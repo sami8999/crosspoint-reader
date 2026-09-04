@@ -1,0 +1,61 @@
+#pragma once
+
+// List files produced by the phone's own encoder - ios/Packages/Artifacts,
+// `ListFileBuilder.encode` - so the reader is tested against the normative
+// writer rather than against hand-rolled CBOR. Regenerate with a SwiftPM
+// executable that depends on the Artifacts package by path and prints
+// `data.map { String(format: "%02x", $0) }.joined()`; the inputs are described
+// above each blob.
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace companion::test {
+
+inline std::vector<uint8_t> fromHex(const std::string& hex) {
+  std::vector<uint8_t> out;
+  out.reserve(hex.size() / 2);
+  for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+    out.push_back(static_cast<uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+  }
+  return out;
+}
+
+// LISTFILE.md's worked example: listId "todos", one "Today" section over both
+// rows, defaultActions = open (bit 3).
+//   rem-1  "Call Sam" / "About the print run" / "17:00", actions 0x206
+//          (complete|snooze|edit), flags pinned, badge "!"
+//   rem-2  "Push firmware", actions 0x106 (complete|snooze|delete), flags done
+inline const char* kGoldenTodos =
+    "a801010265746f646f730365546f646f73041a6a92b70005020681a30165546f646179020003020782a7016572656d2d31026843616c"
+    "6c2053616d037341626f757420746865207072696e742072756e046531373a3030051902060604076121a4016572656d2d32026d5075"
+    "7368206669726d776172650519010606010808";
+
+// Empty list: itemCount 0, empty section array, no defaultActions key.
+inline const char* kGoldenEmpty =
+    "a701010265656d70747903674e6f7468696e670407050006800780";
+
+// Three rows across two sections, unread/done flags, badges, and the accept /
+// decline / reply / archive / delete / open action bits.
+inline const char* kGoldenInbox =
+    "a801010265696e626f780365496e626f78041a6a92c51005030682a30166557267656e7402000301a301654c61746572020103020783"
+    "a7016474682d3102634d756d03781941726520796f7520636f6d696e67206f6e2053756e6461793f046530393a313205183806020761"
+    "32a6016474682d32026d5374616e647570206d6f766564037631303a333020696e7374656164206f662031303a303004634d6f6e0518"
+    "c00600a4016474682d33026a4e6577736c65747465720519010006010808";
+
+// Every display string over its byte cap, so the encoder truncated on a
+// character boundary and appended U+2026. The badge is the one field that is
+// cut without an ellipsis.
+inline const char* kGoldenCaps =
+    "a70101026463617073037840545454545454545454545454545454545454545454545454545454545454545454545454545454545454"
+    "54545454545454545454545454545454545454e280a60401050106800781a70162693102787870707070707070707070707070707070"
+    "707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070"
+    "7070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070e280a60378c873"
+    "737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373"
+    "737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373"
+    "737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373"
+    "73737373737373737373737373737373737373737373737373737373737373737373e280a60478286d6d6d6d6d6d6d6d6d6d6d6d6d6d"
+    "6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6de280a60502060007684e45574e45574e45";
+
+}  // namespace companion::test

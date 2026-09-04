@@ -26,11 +26,16 @@ class Session {
   static constexpr uint32_t kChangePollMs = 5000;
   static constexpr uint32_t kBatteryDeltaPct = 5;
   static constexpr size_t kNameArena = 3072;
-  static constexpr uint32_t kCaps = proto::caps::kBulkTransfer;
+  // bit0 bulk transfer (F2) + bit2 lists/actions (F3/F4: the chord, list files,
+  // Tap/Compose events and ShowReply). Cards, highlights, stats and wifiUpload
+  // stay off until their lanes land.
+  static constexpr uint32_t kCaps = proto::caps::kBulkTransfer | proto::caps::kListsActions;
   // Frame ceiling at the negotiated MTU: min(4096, 128 x (MTU - 4)) (PROTOCOL.md §1.2).
   static size_t maxFrameForMtu(uint16_t mtu);
 
-  Session(LinkPort& link, FsPort& fs, HashPort& hash, SysPort& sys, Outbox& outbox);
+  // `ui` is optional: without it ShowReply is answered Nack{7 unsupported}
+  // exactly as it was before this lane (PROTOCOL.md §3.2).
+  Session(LinkPort& link, FsPort& fs, HashPort& hash, SysPort& sys, Outbox& outbox, UiPort* ui = nullptr);
   ~Session();
 
   // Allocates the frame scratch buffers (PSRAM). Must succeed before use.
@@ -96,6 +101,7 @@ class Session {
   void handlePushEnd(const proto::FrameView& f);
   void handleDeleteFile(const proto::FrameView& f);
   void handleAckEvents(const proto::FrameView& f);
+  void handleShowReply(const proto::FrameView& f);
   void pumpOutbox();
   // Keeps flushing_ and the outbox's flusher count in step.
   void setFlushing(bool on);
@@ -106,6 +112,7 @@ class Session {
   FsPort& fs_;
   SysPort& sys_;
   Outbox& outbox_;
+  UiPort* ui_ = nullptr;
   Transfer transfer_;
 
   State state_ = State::Idle;
