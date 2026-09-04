@@ -40,6 +40,9 @@
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/ScreenshotUtil.h"
+#if CROSSPOINT_COMPANION
+#include "companion/Companion.h"
+#endif
 
 GfxRenderer renderer(display);
 MappedInputManager mappedInputManager(gpio, renderer);
@@ -287,6 +290,9 @@ void enterDeepSleep(bool fromTimeout = false) {
     WiFi.mode(WIFI_OFF);
   }
 
+#if CROSSPOINT_COMPANION
+  companion::prepareForSleep();  // stop BLE host + controller; wake re-inits via setup()
+#endif
   halTiltSensor.deepSleep();
   display.deepSleep();
   Storage.prepareForDeepSleep();
@@ -573,6 +579,10 @@ void setup() {
     gpio.update();
   }
 
+#if CROSSPOINT_COMPANION
+  companion::begin();  // outbox + BLE advertising; storage and settings are loaded above
+#endif
+
   allowSleepAt = millis() + 2000;
 }
 
@@ -653,6 +663,9 @@ void loop() {
         RenderLock lock;
         ScreenshotUtil::takeScreenshot(renderer);
       }
+#if CROSSPOINT_COMPANION && COMPANION_DEBUG_CHORD
+      companion::emitChord();  // debug: the screenshot chord doubles as a Chord event source
+#endif
     }
     return;
   }
@@ -745,6 +758,9 @@ void loop() {
   const unsigned long activityStartTime = millis();
   activityManager.loop();
   const unsigned long activityDuration = millis() - activityStartTime;
+#if CROSSPOINT_COMPANION
+  companion::loop();
+#endif
 
   const unsigned long loopDuration = millis() - loopStartTime;
   if (loopDuration > maxLoopDuration) {
@@ -757,7 +773,11 @@ void loop() {
   // Add delay at the end of the loop to prevent tight spinning
   // When an activity requests skip loop delay (e.g., webserver running), use yield() for faster response
   // Otherwise, use longer delay to save power
-  if (activityManager.skipLoopDelay()) {
+  bool skipDelay = activityManager.skipLoopDelay();
+#if CROSSPOINT_COMPANION
+  skipDelay = skipDelay || companion::wantsFastLoop();  // BLE transfer in flight: keep the loop fast
+#endif
+  if (skipDelay) {
     powerManager.setPowerSaving(false);  // Make sure we're at full performance when skipLoopDelay is requested
     yield();                             // Give FreeRTOS a chance to run tasks, but return immediately
   } else {
