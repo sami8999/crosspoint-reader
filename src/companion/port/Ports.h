@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string_view>
 
 namespace companion {
 
@@ -59,6 +60,20 @@ class HashPort {
   virtual void start() = 0;
   virtual void update(const uint8_t* data, size_t len) = 0;
   virtual void finish(uint8_t out[32]) = 0;
+};
+
+// The screen side of the link. Session hands the phone's ShowReply text here
+// instead of knowing anything about activities; Companion.cpp implements it over
+// the activity stack, and a build (or a host test) without a UI leaves it null,
+// which is what turns ShowReply back into Nack{7 unsupported}.
+class UiPort {
+ public:
+  virtual ~UiPort() = default;
+  // Displays `text` under an optional `title`. The implementation must copy
+  // whatever it keeps: both views point into the receive buffer and are invalid
+  // as soon as this returns. `forEventSeq` echoes the Chord event the reply
+  // answers (0 when the phone did not name one). False -> Nack{6 ioError}.
+  virtual bool showReply(std::string_view text, std::string_view title, uint32_t forEventSeq) = 0;
 };
 
 class SysPort {

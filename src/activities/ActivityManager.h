@@ -17,7 +17,27 @@
 class Activity;    // forward declaration
 class RenderLock;  // forward declaration
 
-enum class HomeMenuItem { NONE, FILE_BROWSER, RECENTS, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU };
+#if CROSSPOINT_COMPANION
+// Fork hook (docs/UPSTREAM_TOUCHPOINTS.md): see Activity::fillChordContext.
+namespace companion::chord {
+struct ChordContext;
+}
+#endif
+
+enum class HomeMenuItem {
+  NONE,
+  FILE_BROWSER,
+  RECENTS,
+  OPDS_BROWSER,
+#if CROSSPOINT_COMPANION
+  // Fork hook (docs/UPSTREAM_TOUCHPOINTS.md): the phone's lists, sitting
+  // between the (optional) OPDS row and File transfer in the Home menu. Stock
+  // envs compile the identical enum they always had.
+  BRAIN,
+#endif
+  FILE_TRANSFER,
+  SETTINGS_MENU
+};
 
 /**
  * ActivityManager
@@ -107,6 +127,10 @@ class ActivityManager {
   bool handleForcedRefresh();
   bool skipLoopDelay() const;
   ScreenshotInfo getScreenshotInfo() const;
+#if CROSSPOINT_COMPANION
+  // Forwards to the current activity; false when there is none, or it declined.
+  bool fillChordContext(companion::chord::ChordContext& ctx);
+#endif
 
   // If immediate is true, the update will be triggered immediately.
   // Otherwise, it will be deferred until the end of the current loop iteration.

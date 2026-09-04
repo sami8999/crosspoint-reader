@@ -17,6 +17,13 @@
 #include "ReaderToolbarUi.h"
 #include "components/OptionPopup.h"
 
+#if CROSSPOINT_COMPANION
+// Fork hook (docs/UPSTREAM_TOUCHPOINTS.md): see Activity::fillChordContext.
+namespace companion::chord {
+struct ChordContext;
+}
+#endif
+
 class EpubReaderActivity final : public ReaderActivity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Section> section = nullptr;
@@ -194,5 +201,11 @@ class EpubReaderActivity final : public ReaderActivity {
   bool skipLoopDelay() override;
 
   ScreenshotInfo getScreenshotInfo() const override;
+#if CROSSPOINT_COMPANION
+  // Fork hook (docs/UPSTREAM_TOUCHPOINTS.md): the companion chord's reader
+  // context - book path, spine, page, the visible page text and the
+  // BookmarkEntry-style anchor for the top of the page.
+  bool fillChordContext(companion::chord::ChordContext& ctx) override;
+#endif
   CrossPointPosition getCurrentPosition() const;
 };

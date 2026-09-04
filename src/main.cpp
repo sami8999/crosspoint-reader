@@ -685,9 +685,6 @@ void loop() {
         RenderLock lock;
         ScreenshotUtil::takeScreenshot(renderer);
       }
-#if CROSSPOINT_COMPANION && COMPANION_DEBUG_CHORD
-      companion::emitChord();  // debug: the screenshot chord doubles as a Chord event source
-#endif
     }
     return;
   }
@@ -777,8 +774,18 @@ void loop() {
     activityManager.requestUpdate();
   }
 
+#if CROSSPOINT_COMPANION
+  // The universal chord (F3) shares the reader's two page-turn buttons, so
+  // while the combo is engaged the activity must not see this input frame at
+  // all: its press and release edges are exactly what the reader turns pages
+  // on. Same shape as the screenshot combo's early return above; everything
+  // else in the loop (the link, sleep timers) keeps running.
+  const bool chordHoldsInput = companion::chordUpdate();
+#else
+  constexpr bool chordHoldsInput = false;
+#endif
   const unsigned long activityStartTime = millis();
-  activityManager.loop();
+  if (!chordHoldsInput) activityManager.loop();
   const unsigned long activityDuration = millis() - activityStartTime;
 #if CROSSPOINT_COMPANION
   companion::loop();

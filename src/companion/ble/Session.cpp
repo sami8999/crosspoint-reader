@@ -10,8 +10,9 @@ namespace companion {
 
 using namespace proto;
 
-Session::Session(LinkPort& link, FsPort& fs, HashPort& hash, SysPort& sys, Outbox& outbox, CardManager& cards)
-    : link_(link), fs_(fs), sys_(sys), outbox_(outbox), cards_(cards), transfer_(fs, hash, sys) {}
+Session::Session(LinkPort& link, FsPort& fs, HashPort& hash, SysPort& sys, Outbox& outbox, CardManager& cards,
+                 UiPort* ui)
+    : link_(link), fs_(fs), sys_(sys), outbox_(outbox), cards_(cards), ui_(ui), transfer_(fs, hash, sys) {}
 
 Session::~Session() {
   setFlushing(false);
@@ -185,6 +186,7 @@ void Session::onCtrlFrame(const uint8_t* frame, size_t len, uint32_t nowMs) {
     case msg::kPushEnd: handlePushEnd(f); break;
     case msg::kDeleteFile: handleDeleteFile(f); break;
     case msg::kAckEvents: handleAckEvents(f); break;
+    case msg::kShowReply: handleShowReply(f); break;
     case msg::kAckFromPhone:
     case msg::kNackFromPhone: {
       // Never answered (§2.1); a Nack is logged for diagnostics.
@@ -197,7 +199,6 @@ void Session::onCtrlFrame(const uint8_t* frame, size_t len, uint32_t nowMs) {
     }
     case msg::kSetCards: handleSetCards(f); break;
     case msg::kOpenBook:
-    case msg::kShowReply:
     case msg::kEnterWifiUpload:
       // Known in v1 but not offered in kCaps by this build (PROTOCOL.md 3.2).
       sendNack(seq, NackCode::Unsupported, "unsupported");
@@ -432,6 +433,27 @@ void Session::handleAckEvents(const FrameView& f) {
   }
   if (!outbox_.ack(a.upToSeq)) {
     sendNack(f.header.seq, NackCode::IoError);
+    return;
+  }
+  sendAck(f.header.seq);
+}
+
+// PROTOCOL.md 2.1: ShowReply is answered Ack on success, Nack otherwise. It is
+// part of the lists/actions capability (caps bit2), so a build without a UI port
+// still says Nack{7 unsupported} rather than pretending it displayed anything.
+void Session::handleShowReply(const FrameView& f) {
+  ShowReply r;
+  if (!decodePayload(f.payload, f.header.len, r)) {
+    sendNack(f.header.seq, NackCode::BadPayload);
+    return;
+  }
+  if (!ui_) {
+    sendNack(f.header.seq, NackCode::Unsupported, "no ui");
+    return;
+  }
+  const std::string_view title = r.title ? *r.title : std::string_view{};
+  if (!ui_->showReply(r.text, title, r.forEventSeq ? *r.forEventSeq : 0)) {
+    sendNack(f.header.seq, NackCode::IoError, "reply");
     return;
   }
   sendAck(f.header.seq);

@@ -9,6 +9,7 @@ using namespace companion::proto;
 using companion::test::FakeFs;
 using companion::test::FakeLink;
 using companion::test::FakeSys;
+using companion::test::FakeUi;
 using companion::test::Sha256;
 
 namespace {
@@ -18,8 +19,11 @@ struct Fixture {
   Sha256 hash;
   FakeSys sys;
   FakeLink link;
+  FakeUi ui;
   Outbox outbox{fs, sys};
   CardManager cards{fs, sys};
+  // The default fixture has no UI wired, which is what keeps ShowReply on the
+  // Nack{7 unsupported} path below; ShowReplyFixture below wires one.
   Session session{link, fs, hash, sys, outbox, cards};
   uint16_t phoneSeq = 0;
   uint8_t buf[kMaxFrameSize];
@@ -276,6 +280,97 @@ TEST(Session, UnknownTypeAndBadPayload) {
   f.link.drain();
   f.sendRaw(0x7D, {0xA0});
   EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::UnknownType);
+}
+
+// The lists/actions capability (caps bit2) is what makes ShowReply real: with a
+// UI port the reader must Ack it (PROTOCOL.md 2.1), without one it stays
+// unsupported.
+struct ShowReplyFixture : Fixture {
+  Session wired{link, fs, hash, sys, outbox, cards, &ui};
+  ShowReplyFixture() { EXPECT_TRUE(wired.begin()); }
+  template <class M>
+  void send(uint8_t type, const M& m) {
+    size_t len = 0;
+    ASSERT_TRUE(encodeFrame(type, phoneSeq++, m, buf, sizeof(buf), len));
+    wired.onCtrlFrame(buf, len, 1000);
+  }
+  void hello() {
+    wired.onConnect(1000);
+    Hello h;
+    h.proto = kProtoVersion;
+    h.app = "ios-test";
+    h.caps = 0x3F;
+    h.clock = 1700000000;
+    send(msg::kHello, h);
+  }
+};
+
+TEST(Session, CapsAdvertiseBulkTransferCardsAndListsActions) {
+  EXPECT_TRUE(Session::kCaps & caps::kBulkTransfer);
+  EXPECT_TRUE(Session::kCaps & caps::kCards);
+  EXPECT_TRUE(Session::kCaps & caps::kListsActions);
+  // Lanes that have not landed must stay off, or the phone will send a command
+  // and get a Nack it did not expect.
+  EXPECT_FALSE(Session::kCaps & caps::kHighlights);
+  EXPECT_FALSE(Session::kCaps & caps::kStats);
+  EXPECT_FALSE(Session::kCaps & caps::kWifiUpload);
+}
+
+TEST(Session, ShowReplyIsAckedAndReachesTheScreen) {
+  ShowReplyFixture f;
+  f.hello();
+  f.link.drain();
+  ShowReply sr;
+  sr.text = "Reminder set for 17:00.";
+  sr.title = "Sam";
+  sr.forEventSeq = 12;
+  f.send(msg::kShowReply, sr);
+
+  EXPECT_EQ(f.decode<Ack>(0, msg::kAckFromReader).seq, f.phoneSeq - 1);
+  ASSERT_EQ(1u, f.ui.replies.size());
+  EXPECT_EQ("Reminder set for 17:00.", f.ui.replies[0].text);
+  EXPECT_EQ("Sam", f.ui.replies[0].title);
+  EXPECT_EQ(12u, f.ui.replies[0].forEventSeq);
+}
+
+TEST(Session, ShowReplyWithoutATitleOrEventSeqStillWorks) {
+  ShowReplyFixture f;
+  f.hello();
+  f.link.drain();
+  ShowReply sr;
+  sr.text = "ok";
+  f.send(msg::kShowReply, sr);
+  EXPECT_EQ(f.decode<Ack>(0, msg::kAckFromReader).seq, f.phoneSeq - 1);
+  ASSERT_EQ(1u, f.ui.replies.size());
+  EXPECT_EQ("", f.ui.replies[0].title);
+  EXPECT_EQ(0u, f.ui.replies[0].forEventSeq);
+}
+
+TEST(Session, ShowReplyThatTheScreenRefusesIsNacked) {
+  ShowReplyFixture f;
+  f.ui.fail = true;
+  f.hello();
+  f.link.drain();
+  ShowReply sr;
+  sr.text = "x";
+  f.send(msg::kShowReply, sr);
+  EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::IoError);
+  EXPECT_TRUE(f.ui.replies.empty());
+}
+
+TEST(Session, ShowReplyWithAMalformedPayloadIsBadPayloadNotUnsupported) {
+  ShowReplyFixture f;
+  f.hello();
+  f.link.drain();
+  // Empty map: `text` is required (PROTOCOL.md 3.1).
+  FrameHeader h;
+  h.type = msg::kShowReply;
+  h.seq = f.phoneSeq++;
+  h.len = 1;
+  encodeFrameHeader(h, f.buf);
+  f.buf[kFrameHeaderSize] = 0xA0;
+  f.wired.onCtrlFrame(f.buf, kFrameHeaderSize + 1, 1000);
+  EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::BadPayload);
 }
 
 TEST(Session, QueryStatusAndFiles) {

@@ -5,10 +5,12 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 
+#include <memory>
 #include <new>
 
 #include "CrossPointState.h"
 #include "Log.h"
+#include "MappedInputManager.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "CrossPointSettings.h"
@@ -16,10 +18,17 @@
 #include "ble/Session.h"
 #include "cards/CardManager.h"
 #include "cards/Wake.h"
+#include "chord/Chord.h"
+#include "chord/ChordCapture.h"
 #include "port/SdPorts.h"
 #include "proto/Cbor.h"
 #include "proto/Messages.h"
 #include "store/Outbox.h"
+#include "ui/BrainHomeActivity.h"
+#include "ui/ChordOverlay.h"
+#include "ui/ReplyActivity.h"
+#include "ui/ReplyStore.h"
+#include "ui/Ui.h"
 
 namespace companion {
 
@@ -40,12 +49,43 @@ CardManager* cards = nullptr;
 Session* sessions[kLinks] = {};
 bool started = false;
 
+// The chord runs whether or not the link is up: an event queued while the phone
+// is away is flushed the moment it reconnects, which is the whole point of the
+// outbox.
+chord::Detector detector;
+ui::ChordOverlay overlay;
+ui::ReplyStore replies;
+// ~2.5 KB with the page text; one instance, reused by every chord.
+chord::ChordContext* chordCtx = nullptr;
+
 template <class T, class... Args>
 T* newInPsram(Args&&... args) {
   void* mem = heap_caps_malloc(sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!mem) return nullptr;
   return new (mem) T(static_cast<Args&&>(args)...);
 }
+
+// The screen side of PROTOCOL.md 0x08. Session runs on the main loop, so
+// pushing an activity from here is safe - ActivityManager defers the push to
+// the next pass anyway.
+class ReplyUi : public UiPort {
+ public:
+  bool showReply(std::string_view text, std::string_view title, uint32_t forEventSeq) override {
+    if (!replies.set(text, title, forEventSeq)) return false;
+    CLOG_INF("reply: %u bytes for event %lu", static_cast<unsigned>(text.size()),
+             static_cast<unsigned long>(forEventSeq));
+    // A reply lands over whatever is on screen, reader page included; the
+    // activity underneath is untouched and comes straight back on Back. A
+    // second reply while one is up replaces the text in place - ReplyActivity
+    // watches the store's generation - rather than stacking another screen.
+    overlay.discard();
+    if (!replies.onScreen()) {
+      activityManager.pushActivity(std::make_unique<ui::ReplyActivity>(renderer, mappedInputManager, replies));
+    }
+    return true;
+  }
+};
+ReplyUi replyUi;
 
 class Dispatcher : public BleServer::Handler {
  public:
@@ -91,6 +131,12 @@ bool anyLinkUp() {
 // short when no central has connected by this point.
 constexpr uint32_t kNoPeerGraceMs = 30000;
 
+// Set for the whole of a headless scheduled-wake boot: there is no display, no
+// fonts and no activity manager pass, so no session gets a UiPort and ShowReply
+// stays on the Nack{7 unsupported} path rather than being Acked for a panel that
+// is thrown away by the sleep-again reset (PROTOCOL.md 2.1).
+bool headlessWake = false;
+
 // info characteristic: {1: proto, 2: fw, 3: device}
 size_t buildInfo(uint8_t* out, size_t cap) {
   proto::CborWriter w(out, cap);
@@ -119,7 +165,9 @@ bool begin() {
     return false;
   }
   for (uint8_t i = 0; i < kLinks; ++i) {
-    if (!sessions[i]) sessions[i] = newInPsram<Session>(ble->link(i), fs, hash, sys, outbox, *cards);
+    if (!sessions[i])
+      sessions[i] =
+          newInPsram<Session>(ble->link(i), fs, hash, sys, outbox, *cards, headlessWake ? nullptr : &replyUi);
     if (!sessions[i]) {
       CLOG_ERR("session %u alloc failed", i);
       return false;
@@ -139,6 +187,7 @@ bool begin() {
 }
 
 void loop() {
+  overlay.tick(millis());
   if (!started) return;
   const uint32_t now = millis();
   ble->poll(dispatcher, now);
@@ -205,6 +254,7 @@ bool runScheduledWakeIfDue() {
     wake::armTimer(0);
     wake::sleepAgain();
   }
+  headlessWake = true;
   const uint32_t windowMs = static_cast<uint32_t>(c->wakeConfig().windowS) * 1000u;
   CLOG_INF("wake: scheduled card wake, advertising for %lu s", static_cast<unsigned long>(windowMs / 1000));
 
@@ -233,29 +283,98 @@ bool runScheduledWakeIfDue() {
   wake::sleepAgain();  // does not return
 }
 
-void emitChord() {
-  if (!outbox.ready()) return;
-  const ScreenshotInfo info = activityManager.getScreenshotInfo();
-  const bool reading = activityManager.isReaderActivity();
-  proto::ChordCtx ctx;
-  switch (info.readerType) {
-    case ScreenshotInfo::ReaderType::Epub: ctx.screen = "epub"; break;
-    case ScreenshotInfo::ReaderType::Txt: ctx.screen = "txt"; break;
-    case ScreenshotInfo::ReaderType::Xtc: ctx.screen = "xtc"; break;
-    default: ctx.screen = reading ? "reader" : "home"; break;
-  }
-  if (reading && !APP_STATE.openEpubPath.empty()) ctx.book = std::string_view(APP_STATE.openEpubPath);
-  if (info.spineIndex >= 0) ctx.spine = static_cast<uint32_t>(info.spineIndex);
-  if (info.currentPage > 0) ctx.page = static_cast<uint32_t>(info.currentPage);
-  const uint32_t seq = outbox.append(proto::EventKind::Chord, [&](proto::CborWriter& w) { return ctx.encode(w); });
+namespace {
+
+// Wakes every live session so a freshly appended event is notified now rather
+// than at the next Status tick.
+void kickFlush(uint32_t seq, const char* what) {
   if (!seq) {
-    CLOG_ERR("chord: outbox append failed");
+    CLOG_ERR("%s: outbox append failed", what);
     return;
   }
-  CLOG_INF("chord: event %lu queued (%s)", static_cast<unsigned long>(seq), ctx.screen.data());
+  CLOG_INF("%s: event %lu queued", what, static_cast<unsigned long>(seq));
   for (auto* s : sessions) {
     if (s) s->onOutboxAppended();
   }
+}
+
+}  // namespace
+
+bool emitChord(const char* screenOverride) {
+  if (!outbox.ready()) return false;
+  if (!chordCtx) {
+    chordCtx = newInPsram<chord::ChordContext>();
+    if (!chordCtx) {
+      CLOG_ERR("chord: context alloc failed");
+      return false;
+    }
+  }
+  chord::captureContext(*chordCtx);
+  if (screenOverride && *screenOverride) chordCtx->setScreen(screenOverride);
+  const uint32_t seq =
+      outbox.append(proto::EventKind::Chord, [&](proto::CborWriter& w) { return chord::encodeChordCtx(*chordCtx, w); });
+  kickFlush(seq, "chord");
+  if (!seq) {
+    overlay.show("Not sent", millis());
+    return false;
+  }
+  // The phone starts recording when the event reaches it; the panel says the
+  // reader's half is done without repainting the page underneath.
+  overlay.show("Listening…", millis());
+  return true;
+}
+
+bool emitTap(const char* listId, const char* itemId, const uint8_t actionId) {
+  if (!outbox.ready() || !listId || !itemId) return false;
+  proto::TapCtx ctx;
+  ctx.listId = listId;
+  ctx.itemId = itemId;
+  ctx.action = static_cast<proto::TapAction>(actionId);
+  const uint32_t seq = outbox.append(proto::EventKind::Tap, [&](proto::CborWriter& w) { return ctx.encode(w); });
+  kickFlush(seq, "tap");
+  overlay.show(seq ? "Sent" : "Not sent", millis());
+  return seq != 0;
+}
+
+bool emitCompose(const char* target, const char* text) {
+  if (!outbox.ready() || !target || !text) return false;
+  proto::ComposeCtx ctx;
+  ctx.target = target;
+  ctx.text = text;
+  const uint32_t seq = outbox.append(proto::EventKind::Compose, [&](proto::CborWriter& w) { return ctx.encode(w); });
+  kickFlush(seq, "compose");
+  overlay.show(seq ? "Sent" : "Not sent", millis());
+  return seq != 0;
+}
+
+bool chordUpdate() {
+  const uint32_t now = millis();
+  // Logical buttons, so a user who has remapped the front pair (or is reading
+  // upside down) chords with whatever their page-turn keys currently are.
+  const chord::Tick tick = detector.update(mappedInputManager.isPressed(MappedInputManager::Button::Left),
+                                           mappedInputManager.isPressed(MappedInputManager::Button::Right), now);
+  if (tick.fired) emitChord();
+  // Take the panel down before the activity acts on this input frame: hide()
+  // writes the saved pixels back, and doing that after a page turn had
+  // repainted underneath would paste a stale band over the new page. The
+  // combo's own frames do not count as "the user did something".
+  overlay.tick(now, !tick.holdsInput && (mappedInputManager.wasAnyPressed() || mappedInputManager.wasAnyReleased()));
+  return tick.holdsInput;
+}
+
+void filterPageTurn(bool& prev, bool& next, const bool fromChordButton) {
+  const chord::PageTurn out = detector.filterPageTurn({prev, next}, fromChordButton, millis());
+  prev = out.prev;
+  next = out.next;
+}
+
+FsPort& fsPort() { return fs; }
+SysPort& sysPort() { return sys; }
+ui::ReplyStore& replyStore() { return replies; }
+
+void openBrain() {
+  overlay.discard();
+  activityManager.pushActivity(std::make_unique<ui::BrainHomeActivity>(renderer, mappedInputManager));
 }
 
 }  // namespace companion

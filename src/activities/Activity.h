@@ -13,6 +13,15 @@
 #include "RenderLock.h"
 #include "util/ScreenshotInfo.h"
 
+#if CROSSPOINT_COMPANION
+// Fork hook (docs/UPSTREAM_TOUCHPOINTS.md): the companion chord asks the
+// foreground screen what the user is looking at. Forward-declared so no
+// upstream translation unit gains a companion include.
+namespace companion::chord {
+struct ChordContext;
+}
+#endif
+
 class Activity {
   friend class ActivityManager;
 
@@ -52,6 +61,12 @@ class Activity {
   virtual bool isHomeActivity() const { return false; }
   virtual bool handleHomeGesture() { return false; }
   virtual ScreenshotInfo getScreenshotInfo() const { return {}; }
+#if CROSSPOINT_COMPANION
+  // Companion chord (F3): fill in book path, spine, page, page text and the
+  // BookmarkEntry-style anchor. Return true when this screen supplied reader
+  // context; the default declines and the chord falls back to ScreenshotInfo.
+  virtual bool fillChordContext(companion::chord::ChordContext&) { return false; }
+#endif
 
   // Start a new activity without destroying the current one
   // Note: requestUpdate() will be invoked automatically once resultHandler finishes

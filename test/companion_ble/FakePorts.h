@@ -290,6 +290,25 @@ class FakeSys : public SysPort {
   }
 };
 
+// Records what the link asked the screen to show. `fail` turns the port into a
+// UI that cannot display (Nack{6 ioError}).
+class FakeUi : public UiPort {
+ public:
+  struct Shown {
+    std::string text;
+    std::string title;
+    uint32_t forEventSeq;
+  };
+  std::vector<Shown> replies;
+  bool fail = false;
+
+  bool showReply(std::string_view text, std::string_view title, uint32_t forEventSeq) override {
+    if (fail) return false;
+    replies.push_back({std::string(text), std::string(title), forEventSeq});
+    return true;
+  }
+};
+
 class FakeLink : public LinkPort {
  public:
   std::vector<std::vector<uint8_t>> frames;

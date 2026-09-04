@@ -9,6 +9,9 @@
 
 #include "MappedInputManager.h"
 #include "activities/ActivityManager.h"
+#if CROSSPOINT_COMPANION
+#include "companion/Companion.h"
+#endif
 
 namespace ReaderUtils {
 
@@ -65,7 +68,25 @@ inline PageTurnResult detectPageTurn(const MappedInputManager& input) {
                          input.wasReleased(MappedInputManager::Button::Power);
   const bool next = tiltNext || pageButtonTriggered(MappedInputManager::Button::PageForward) || powerTurn ||
                     pageButtonTriggered(nextButton);
+#if CROSSPOINT_COMPANION
+  // Fork hook (docs/UPSTREAM_TOUCHPOINTS.md): the companion chord is these same
+  // two front buttons held together. With the default "turn on press" setting
+  // the first of the pair has already asked for a page by the time the second
+  // lands, so a front-button turn is held for ~200 ms while its partner might
+  // still arrive and dropped if the chord fires. Side rocker, touch zones and
+  // tilt are never delayed - isPressed()/wasReleased() are side-effect free, so
+  // this adds no input state of its own.
+  bool filteredPrev = prev;
+  bool filteredNext = next;
+  const bool fromChordButton = input.isPressed(MappedInputManager::Button::Left) ||
+                               input.isPressed(MappedInputManager::Button::Right) ||
+                               input.wasReleased(MappedInputManager::Button::Left) ||
+                               input.wasReleased(MappedInputManager::Button::Right);
+  companion::filterPageTurn(filteredPrev, filteredNext, fromChordButton);
+  return {filteredPrev, filteredNext, tiltPrev || tiltNext};
+#else
   return {prev, next, tiltPrev || tiltNext};
+#endif
 }
 
 struct TouchPageTurn {
