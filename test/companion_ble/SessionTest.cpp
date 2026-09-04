@@ -183,7 +183,7 @@ TEST(Session, PushFileBusyBeforeValidationAndChunkSizeCap) {
   std::vector<uint8_t> payload(10, 1);
   auto sha = Sha256::digest(payload);
   PushFile p;
-  p.path = "/a.bin";
+  p.path = "/.companion/a.bin";
   p.size = 10;
   p.sha256 = CborBytes{sha.data(), sha.size()};
   p.chunkSize = 513;  // MTU 517 - 5 = 512 is the ceiling
@@ -454,7 +454,7 @@ TEST(Session, DisconnectAbortsTransfer) {
   std::vector<uint8_t> payload(10, 1);
   auto sha = Sha256::digest(payload);
   PushFile p;
-  p.path = "/a.bin";
+  p.path = "/.companion/a.bin";
   p.size = 10;
   p.sha256 = CborBytes{sha.data(), sha.size()};
   p.chunkSize = 500;
@@ -473,16 +473,16 @@ TEST(Session, DisconnectAbortsTransfer) {
 
 TEST(Session, DeleteFile) {
   Fixture f;
-  f.fs.files["/Books/x.epub"] = {1};
+  f.fs.files["/Brain/x.epub"] = {1};
   f.connectAndHello();
   f.link.drain();
   DeleteFile d;
-  d.path = "/Books/x.epub";
+  d.path = "/Brain/x.epub";
   f.sendFrame(msg::kDeleteFile, d);
   f.decode<Ack>(0, msg::kAckFromReader);
-  EXPECT_FALSE(f.fs.files.count("/Books/x.epub"));
+  EXPECT_FALSE(f.fs.files.count("/Brain/x.epub"));
   ASSERT_EQ(f.fs.replaced.size(), 1u);
-  EXPECT_EQ(f.fs.replaced[0], "/Books/x.epub");
+  EXPECT_EQ(f.fs.replaced[0], "/Brain/x.epub");
   f.link.drain();
   f.sendFrame(msg::kDeleteFile, d);
   EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::NotFound);
@@ -490,4 +490,40 @@ TEST(Session, DeleteFile) {
   d.path = "../etc";
   f.sendFrame(msg::kDeleteFile, d);
   EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::BadPayload);
+}
+
+// The link is unauthenticated (no pairing, no encryption): a write or delete
+// outside the phone's own directories must never reach the card.
+TEST(Session, WritesOutsideTheCompanionRootsAreRefused) {
+  Fixture f;
+  f.fs.files["/.crosspoint/settings.json"] = {1, 2, 3};
+  f.connectAndHello();
+  f.link.drain();
+  DeleteFile d;
+  d.path = "/.crosspoint/settings.json";
+  f.sendFrame(msg::kDeleteFile, d);
+  EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::NotFound);
+  EXPECT_TRUE(f.fs.files.count("/.crosspoint/settings.json"));  // still there
+  EXPECT_TRUE(f.fs.replaced.empty());                           // caches not even poked
+  f.link.drain();
+  std::vector<uint8_t> payload(10, 1);
+  auto sha = Sha256::digest(payload);
+  PushFile p;
+  p.path = "/.crosspoint/settings.json";
+  p.size = payload.size();
+  p.sha256 = CborBytes{sha.data(), sha.size()};
+  p.chunkSize = 500;
+  p.transferId = 1;
+  f.sendFrame(msg::kPushFile, p);
+  EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::NotFound);
+  EXPECT_FALSE(f.session.transferActive());
+  EXPECT_EQ(f.fs.files["/.crosspoint/settings.json"], (std::vector<uint8_t>{1, 2, 3}));
+  f.link.drain();
+  // Reading is deliberately still allowed anywhere on the card.
+  Query q;
+  q.what = QueryWhat::Files;
+  q.path = std::string_view("/.crosspoint");
+  f.fs.mkdirs("/.crosspoint");
+  f.sendFrame(msg::kQuery, q);
+  EXPECT_EQ(f.frame(0).header.type, msg::kFiles);
 }

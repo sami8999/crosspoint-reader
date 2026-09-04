@@ -297,6 +297,9 @@ void Session::handlePushFile(const FrameView& f, uint32_t nowMs) {
     case Transfer::BeginResult::Ok: sendAck(f.header.seq); break;
     case Transfer::BeginResult::Busy: sendNack(f.header.seq, NackCode::Busy); break;
     case Transfer::BeginResult::BadRequest: sendNack(f.header.seq, NackCode::BadPayload, "push"); break;
+    // Outside the phone's directories: reported as notFound so the link leaks
+    // nothing about what is on the card.
+    case Transfer::BeginResult::Denied: sendNack(f.header.seq, NackCode::NotFound, "path"); break;
     case Transfer::BeginResult::IoError: sendNack(f.header.seq, NackCode::IoError); break;
   }
 }
@@ -315,6 +318,12 @@ void Session::handleDeleteFile(const FrameView& f) {
   DeleteFile d;
   if (!decodePayload(f.payload, f.header.len, d) || !Transfer::validPath(d.path.data(), d.path.size())) {
     sendNack(f.header.seq, NackCode::BadPayload);
+    return;
+  }
+  if (!Transfer::writablePath(d.path.data(), d.path.size())) {
+    CLOG_ERR("session: delete of %.*s refused (outside the companion roots)", static_cast<int>(d.path.size()),
+             d.path.data());
+    sendNack(f.header.seq, NackCode::NotFound, "path");
     return;
   }
   char path[Transfer::kMaxPath + 1];

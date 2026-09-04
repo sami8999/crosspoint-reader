@@ -73,6 +73,38 @@ TEST(Transfer, ValidPath) {
   EXPECT_FALSE(Transfer::validPath(longPath.c_str(), longPath.size()));
 }
 
+// Writes and deletes are confined to the directories the phone owns; with no
+// pairing or encryption on the link yet (README.md "Security"), an unpaired peer
+// in range must not be able to touch /.crosspoint/settings.json or a user's book.
+TEST(Transfer, WritablePathAllowList) {
+  EXPECT_TRUE(Transfer::writablePath("/.companion/lists/todos.list", 28));
+  EXPECT_TRUE(Transfer::writablePath("/.sleep/brief.bmp", 17));
+  EXPECT_TRUE(Transfer::writablePath("/Brain/Today.epub", 17));
+  // FAT is case-insensitive, so the allow-list is too (blocking these would not
+  // protect anything - they name the very same directories).
+  EXPECT_TRUE(Transfer::writablePath("/BRAIN/Today.epub", 17));
+  EXPECT_TRUE(Transfer::writablePath("/.Sleep/brief.bmp", 17));
+  // Everything else on the card.
+  EXPECT_FALSE(Transfer::writablePath("/.crosspoint/settings.json", 26));
+  EXPECT_FALSE(Transfer::writablePath("/Books/mine.epub", 16));
+  EXPECT_FALSE(Transfer::writablePath("/a.bin", 6));
+  EXPECT_FALSE(Transfer::writablePath("/.companionx/a", 14));
+  EXPECT_FALSE(Transfer::writablePath("/Brainy/a", 9));
+  EXPECT_FALSE(Transfer::writablePath("/Brain", 6));       // the directory itself
+  EXPECT_FALSE(Transfer::writablePath("/Brain/", 7));      // trailing slash: not a file
+  EXPECT_FALSE(Transfer::writablePath("/Brain/../x", 11));  // still rejected by validPath
+}
+
+TEST(Transfer, PushOutsideTheAllowListIsDenied) {
+  Fixture f;
+  f.makePayload(10);
+  EXPECT_EQ(f.xfer.begin(f.request("/.crosspoint/settings.json"), 0), Transfer::BeginResult::Denied);
+  EXPECT_FALSE(f.xfer.active());
+  EXPECT_TRUE(f.fs.files.empty());
+  EXPECT_EQ(f.sys.live, 0u);
+  EXPECT_EQ(f.xfer.begin(f.request("/Brain/ok.epub"), 0), Transfer::BeginResult::Ok);
+}
+
 TEST(Transfer, PsramPathHappyCase) {
   Fixture f;
   f.makePayload(1234);
@@ -98,7 +130,7 @@ TEST(Transfer, PsramPathHappyCase) {
 TEST(Transfer, MissingChunksReportedThenResendCompletes) {
   Fixture f;
   f.makePayload(5000);  // 10 chunks
-  ASSERT_EQ(f.xfer.begin(f.request("/Books/a.epub"), 0), Transfer::BeginResult::Ok);
+  ASSERT_EQ(f.xfer.begin(f.request("/Brain/a.epub"), 0), Transfer::BeginResult::Ok);
   for (size_t i = 0; i < f.chunkCount(); ++i) {
     if (i == 2 || i == 7) continue;
     f.sendChunk(i);
@@ -115,21 +147,21 @@ TEST(Transfer, MissingChunksReportedThenResendCompletes) {
   f.sendChunk(7);
   f.xfer.end(7, ack);
   EXPECT_EQ(ack.status, PushStatus::Ok);
-  EXPECT_EQ(f.fs.files["/Books/a.epub"], f.payload);
+  EXPECT_EQ(f.fs.files["/Brain/a.epub"], f.payload);
 }
 
 TEST(Transfer, HashMismatchAbortsAndRemovesPart) {
   Fixture f;
   f.makePayload(700);
   f.sha[0] ^= 0xFF;
-  ASSERT_EQ(f.xfer.begin(f.request("/x/y.bin"), 0), Transfer::BeginResult::Ok);
+  ASSERT_EQ(f.xfer.begin(f.request("/.companion/y.bin"), 0), Transfer::BeginResult::Ok);
   for (size_t i = 0; i < f.chunkCount(); ++i) f.sendChunk(i);
   PushAck ack;
   f.xfer.end(7, ack);
   EXPECT_EQ(ack.status, PushStatus::HashMismatch);
   EXPECT_FALSE(f.xfer.active());
-  EXPECT_FALSE(f.fs.files.count("/x/y.bin"));
-  EXPECT_FALSE(f.fs.files.count("/x/y.bin.part"));
+  EXPECT_FALSE(f.fs.files.count("/.companion/y.bin"));
+  EXPECT_FALSE(f.fs.files.count("/.companion/y.bin.part"));
   EXPECT_TRUE(f.fs.replaced.empty());
 }
 
@@ -139,8 +171,8 @@ TEST(Transfer, UnknownTransferAndBusy) {
   PushAck ack;
   f.xfer.end(99, ack);
   EXPECT_EQ(ack.status, PushStatus::UnknownTransfer);
-  ASSERT_EQ(f.xfer.begin(f.request("/a.bin", 1), 0), Transfer::BeginResult::Ok);
-  EXPECT_EQ(f.xfer.begin(f.request("/b.bin", 2), 0), Transfer::BeginResult::Busy);
+  ASSERT_EQ(f.xfer.begin(f.request("/.companion/a.bin", 1), 0), Transfer::BeginResult::Ok);
+  EXPECT_EQ(f.xfer.begin(f.request("/.companion/b.bin", 2), 0), Transfer::BeginResult::Busy);
   f.xfer.end(2, ack);
   EXPECT_EQ(ack.status, PushStatus::UnknownTransfer);
   EXPECT_TRUE(f.xfer.active());
@@ -151,14 +183,14 @@ TEST(Transfer, BadRequests) {
   f.makePayload(10);
   PushFile p = f.request("relative");
   EXPECT_EQ(f.xfer.begin(p, 0), Transfer::BeginResult::BadRequest);
-  p = f.request("/ok");
+  p = f.request("/Brain/ok");
   p.chunkSize = 0;
   EXPECT_EQ(f.xfer.begin(p, 0), Transfer::BeginResult::BadRequest);
-  p = f.request("/ok");
+  p = f.request("/Brain/ok");
   p.chunkSize = 1;
   p.size = 70000;  // > 65536 chunks
   EXPECT_EQ(f.xfer.begin(p, 0), Transfer::BeginResult::BadRequest);
-  p = f.request("/ok");
+  p = f.request("/Brain/ok");
   p.size = Transfer::kMaxFileSize + 1;
   EXPECT_EQ(f.xfer.begin(p, 0), Transfer::BeginResult::BadRequest);
   EXPECT_FALSE(f.xfer.active());
@@ -168,15 +200,15 @@ TEST(Transfer, ChunkSizeAboveLinkCapIsBadRequest) {
   Fixture f;
   f.makePayload(1000);
   f.chunkSize = 500;
-  EXPECT_EQ(f.xfer.begin(f.request("/a.bin"), 0, 499), Transfer::BeginResult::BadRequest);
-  EXPECT_EQ(f.xfer.begin(f.request("/a.bin"), 0, 500), Transfer::BeginResult::Ok);
+  EXPECT_EQ(f.xfer.begin(f.request("/.companion/a.bin"), 0, 499), Transfer::BeginResult::BadRequest);
+  EXPECT_EQ(f.xfer.begin(f.request("/.companion/a.bin"), 0, 500), Transfer::BeginResult::Ok);
 }
 
 TEST(Transfer, MissingListCappedAt400) {
   Fixture f;
   f.chunkSize = 1;
   f.makePayload(1000);  // 1000 chunks of 1 byte
-  ASSERT_EQ(f.xfer.begin(f.request("/a.bin"), 0), Transfer::BeginResult::Ok);
+  ASSERT_EQ(f.xfer.begin(f.request("/.companion/a.bin"), 0), Transfer::BeginResult::Ok);
   f.sendChunk(0);
   PushAck ack;
   f.xfer.end(7, ack);
@@ -192,7 +224,7 @@ TEST(Transfer, MissingListCappedAt400) {
 TEST(Transfer, IgnoresBadChunks) {
   Fixture f;
   f.makePayload(1000);  // 2 chunks of 500
-  ASSERT_EQ(f.xfer.begin(f.request("/a.bin"), 0), Transfer::BeginResult::Ok);
+  ASSERT_EQ(f.xfer.begin(f.request("/.companion/a.bin"), 0), Transfer::BeginResult::Ok);
   BulkChunk c;
   c.index = 5;  // out of range
   c.data = f.payload.data();
@@ -210,43 +242,43 @@ TEST(Transfer, IgnoresBadChunks) {
 TEST(Transfer, ZeroLengthFile) {
   Fixture f;
   f.makePayload(0);
-  ASSERT_EQ(f.xfer.begin(f.request("/empty.txt"), 0), Transfer::BeginResult::Ok);
+  ASSERT_EQ(f.xfer.begin(f.request("/.companion/empty.txt"), 0), Transfer::BeginResult::Ok);
   PushAck ack;
   f.xfer.end(7, ack);
   EXPECT_EQ(ack.status, PushStatus::Ok);
-  ASSERT_TRUE(f.fs.files.count("/empty.txt"));
-  EXPECT_TRUE(f.fs.files["/empty.txt"].empty());
+  ASSERT_TRUE(f.fs.files.count("/.companion/empty.txt"));
+  EXPECT_TRUE(f.fs.files["/.companion/empty.txt"].empty());
 }
 
 TEST(Transfer, ReplacesExistingFile) {
   Fixture f;
-  f.fs.files["/a.bin"] = {1, 2, 3};
+  f.fs.files["/.companion/a.bin"] = {1, 2, 3};
   f.makePayload(600);
-  ASSERT_EQ(f.xfer.begin(f.request("/a.bin"), 0), Transfer::BeginResult::Ok);
+  ASSERT_EQ(f.xfer.begin(f.request("/.companion/a.bin"), 0), Transfer::BeginResult::Ok);
   for (size_t i = 0; i < f.chunkCount(); ++i) f.sendChunk(i);
   PushAck ack;
   f.xfer.end(7, ack);
   EXPECT_EQ(ack.status, PushStatus::Ok);
-  EXPECT_EQ(f.fs.files["/a.bin"], f.payload);
+  EXPECT_EQ(f.fs.files["/.companion/a.bin"], f.payload);
 }
 
 TEST(Transfer, IoErrorOnRename) {
   Fixture f;
   f.makePayload(600);
   f.fs.failRename = true;
-  ASSERT_EQ(f.xfer.begin(f.request("/a.bin"), 0), Transfer::BeginResult::Ok);
+  ASSERT_EQ(f.xfer.begin(f.request("/.companion/a.bin"), 0), Transfer::BeginResult::Ok);
   for (size_t i = 0; i < f.chunkCount(); ++i) f.sendChunk(i);
   PushAck ack;
   f.xfer.end(7, ack);
   EXPECT_EQ(ack.status, PushStatus::IoError);
   EXPECT_FALSE(f.xfer.active());
-  EXPECT_FALSE(f.fs.files.count("/a.bin.part"));
+  EXPECT_FALSE(f.fs.files.count("/.companion/a.bin.part"));
 }
 
 TEST(Transfer, IdleTimeoutAborts) {
   Fixture f;
   f.makePayload(600);
-  ASSERT_EQ(f.xfer.begin(f.request("/a.bin"), 1000), Transfer::BeginResult::Ok);
+  ASSERT_EQ(f.xfer.begin(f.request("/.companion/a.bin"), 1000), Transfer::BeginResult::Ok);
   f.xfer.tick(1000 + Transfer::kIdleTimeoutMs);
   EXPECT_TRUE(f.xfer.active());
   f.xfer.tick(1000 + Transfer::kIdleTimeoutMs + 1);
@@ -259,23 +291,23 @@ TEST(Transfer, SdStreamingPathWhenPsramExhausted) {
   Fixture f;
   f.makePayload(2500);
   f.sys.allocFailAfter = 1;
-  ASSERT_EQ(f.xfer.begin(f.request("/big/file.bin"), 0), Transfer::BeginResult::IoError);
+  ASSERT_EQ(f.xfer.begin(f.request("/Brain/file.bin"), 0), Transfer::BeginResult::IoError);
   EXPECT_FALSE(f.xfer.active());
   EXPECT_EQ(f.sys.live, 0u);
   // Exceeding the PSRAM budget selects SD streaming deterministically.
   Fixture g;
   g.chunkSize = 4096;
   g.makePayload(Transfer::kPsramBudget + 5000);
-  ASSERT_EQ(g.xfer.begin(g.request("/big/file.bin"), 0), Transfer::BeginResult::Ok);
+  ASSERT_EQ(g.xfer.begin(g.request("/Brain/file.bin"), 0), Transfer::BeginResult::Ok);
   EXPECT_TRUE(g.xfer.usesSd());
-  ASSERT_TRUE(g.fs.files.count("/big/file.bin.part"));
+  ASSERT_TRUE(g.fs.files.count("/Brain/file.bin.part"));
   // Out-of-order delivery.
   for (size_t i = g.chunkCount(); i-- > 0;) g.sendChunk(i);
   PushAck ack;
   g.xfer.end(7, ack);
   EXPECT_EQ(ack.status, PushStatus::Ok);
-  EXPECT_EQ(g.fs.files["/big/file.bin"], g.payload);
-  EXPECT_FALSE(g.fs.files.count("/big/file.bin.part"));
+  EXPECT_EQ(g.fs.files["/Brain/file.bin"], g.payload);
+  EXPECT_FALSE(g.fs.files.count("/Brain/file.bin.part"));
   EXPECT_EQ(g.sys.live, 0u);
 }
 
@@ -298,11 +330,11 @@ TEST(Transfer, SdStreamingPreSizesPartFile) {
   Fixture g;
   g.chunkSize = 4096;
   g.makePayload(Transfer::kPsramBudget + 5000);
-  ASSERT_EQ(g.xfer.begin(g.request("/big/file.bin"), 0), Transfer::BeginResult::Ok);
+  ASSERT_EQ(g.xfer.begin(g.request("/Brain/file.bin"), 0), Transfer::BeginResult::Ok);
   EXPECT_TRUE(g.xfer.usesSd());
   // `.part` is full-size before the first chunk lands, so a seek-write anywhere
   // inside it succeeds.
-  EXPECT_EQ(g.fs.files["/big/file.bin.part"].size(), g.payload.size());
+  EXPECT_EQ(g.fs.files["/Brain/file.bin.part"].size(), g.payload.size());
 }
 
 // A gapped, out-of-order chunk sequence is the normal case on the bulk
@@ -313,7 +345,7 @@ TEST(Transfer, SdStreamingAcceptsGappedOutOfOrderChunks) {
     g.fs.supportsPreAllocate = preAlloc;  // false exercises the zero-fill fallback
     g.chunkSize = 4096;
     g.makePayload(Transfer::kPsramBudget + 5000);
-    ASSERT_EQ(g.xfer.begin(g.request("/big/file.bin"), 0), Transfer::BeginResult::Ok);
+    ASSERT_EQ(g.xfer.begin(g.request("/Brain/file.bin"), 0), Transfer::BeginResult::Ok);
     ASSERT_TRUE(g.xfer.usesSd());
     const size_t n = g.chunkCount();
     ASSERT_GT(n, 8u);
@@ -331,8 +363,8 @@ TEST(Transfer, SdStreamingAcceptsGappedOutOfOrderChunks) {
     }
     g.xfer.end(7, ack);
     EXPECT_EQ(ack.status, PushStatus::Ok) << "preAllocate=" << preAlloc;
-    EXPECT_EQ(g.fs.files["/big/file.bin"], g.payload);
-    EXPECT_FALSE(g.fs.files.count("/big/file.bin.part"));
+    EXPECT_EQ(g.fs.files["/Brain/file.bin"], g.payload);
+    EXPECT_FALSE(g.fs.files.count("/Brain/file.bin.part"));
     EXPECT_EQ(g.sys.live, 0u);
   }
 }
@@ -343,7 +375,7 @@ TEST(Transfer, SdStreamingFailsWhenPartCannotBePreSized) {
   g.chunkSize = 4096;
   g.makePayload(Transfer::kPsramBudget + 5000);
   g.fs.failFileWrites = true;  // the zero-fill fallback cannot write either
-  EXPECT_EQ(g.xfer.begin(g.request("/big/file.bin"), 0), Transfer::BeginResult::IoError);
+  EXPECT_EQ(g.xfer.begin(g.request("/Brain/file.bin"), 0), Transfer::BeginResult::IoError);
   EXPECT_FALSE(g.xfer.active());
   EXPECT_EQ(g.sys.live, 0u);
 }
@@ -353,11 +385,11 @@ TEST(Transfer, SdStreamingHashMismatch) {
   g.chunkSize = 4096;
   g.makePayload(Transfer::kPsramBudget + 1);
   g.sha[5] ^= 1;
-  ASSERT_EQ(g.xfer.begin(g.request("/big/file.bin"), 0), Transfer::BeginResult::Ok);
+  ASSERT_EQ(g.xfer.begin(g.request("/Brain/file.bin"), 0), Transfer::BeginResult::Ok);
   for (size_t i = 0; i < g.chunkCount(); ++i) g.sendChunk(i);
   PushAck ack;
   g.xfer.end(7, ack);
   EXPECT_EQ(ack.status, PushStatus::HashMismatch);
-  EXPECT_FALSE(g.fs.files.count("/big/file.bin"));
-  EXPECT_FALSE(g.fs.files.count("/big/file.bin.part"));
+  EXPECT_FALSE(g.fs.files.count("/Brain/file.bin"));
+  EXPECT_FALSE(g.fs.files.count("/Brain/file.bin.part"));
 }

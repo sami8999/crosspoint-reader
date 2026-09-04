@@ -8,6 +8,28 @@
 
 namespace companion {
 
+namespace {
+
+// Directories the phone owns (docs/INTEGRATION.md): lists/outbox/highlights/stats
+// under /.companion, sleep cards under /.sleep, generated prose under /Brain.
+// CrossPoint has no fixed library directory - the user's own books live anywhere
+// on the card - so nothing else is writable over the link.
+constexpr const char* kWritableRoots[] = {"/.companion/", "/.sleep/", "/Brain/"};
+
+char fold(char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; }
+
+// FAT and exFAT are case-insensitive, so "/brain/x" and "/Brain/x" name the same
+// file; the allow-list has to match the filesystem or it would only be theatre.
+bool underRoot(const char* p, size_t len, const char* root) {
+  size_t i = 0;
+  for (; root[i]; ++i) {
+    if (i >= len || fold(p[i]) != fold(root[i])) return false;
+  }
+  return len > i;  // a leaf name must follow the directory
+}
+
+}  // namespace
+
 Transfer::Transfer(FsPort& fs, HashPort& hash, SysPort& sys) : fs_(fs), hash_(hash), sys_(sys) {}
 
 Transfer::~Transfer() { release(); }
@@ -31,6 +53,14 @@ bool Transfer::validPath(const char* p, size_t len) {
   return true;
 }
 
+bool Transfer::writablePath(const char* p, size_t len) {
+  if (!validPath(p, len)) return false;
+  for (const char* root : kWritableRoots) {
+    if (underRoot(p, len, root)) return true;
+  }
+  return false;
+}
+
 void Transfer::release() {
   part_.reset();
   if (data_) sys_.freeBig(data_);
@@ -51,6 +81,11 @@ void Transfer::abort() {
 Transfer::BeginResult Transfer::begin(const proto::PushFile& req, uint32_t nowMs, uint32_t maxChunkSize) {
   if (active_) return BeginResult::Busy;
   if (!validPath(req.path.data(), req.path.size())) return BeginResult::BadRequest;
+  if (!writablePath(req.path.data(), req.path.size())) {
+    CLOG_ERR("xfer: write to %.*s refused (outside the companion roots)", static_cast<int>(req.path.size()),
+             req.path.data());
+    return BeginResult::Denied;
+  }
   if (maxChunkSize > kMaxChunkSize) maxChunkSize = kMaxChunkSize;
   if (req.size > kMaxFileSize || req.chunkSize == 0 || req.chunkSize > maxChunkSize) return BeginResult::BadRequest;
   if (req.sha256.len != proto::kSha256Len) return BeginResult::BadRequest;

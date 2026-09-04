@@ -30,7 +30,7 @@ class Transfer {
   static constexpr size_t kMaxPath = 200;
   static constexpr size_t kIoBuf = 4096;
 
-  enum class BeginResult : uint8_t { Ok, Busy, BadRequest, IoError };
+  enum class BeginResult : uint8_t { Ok, Busy, BadRequest, Denied, IoError };
 
   Transfer(FsPort& fs, HashPort& hash, SysPort& sys);
   ~Transfer();
@@ -51,7 +51,12 @@ class Transfer {
   const ChunkBitmap& bitmap() const { return bitmap_; }
   const char* path() const { return path_; }
 
+  // Syntactically safe absolute path (no "..", no backslashes, no empty segments).
   static bool validPath(const char* path, size_t len);
+  // validPath() *and* under one of the directories the phone owns. Anything else
+  // on the card - settings, the user's own books, caches - is read-only over the
+  // link. See the "Security" section of README.md.
+  static bool writablePath(const char* path, size_t len);
 
  private:
   // Grows `.part` to size_ so out-of-order chunk writes can seek anywhere inside it.

@@ -18,3 +18,37 @@ Host tests (gtest, no device needed):
 
 - `test/companion_proto/` checks every golden vector in `protocol/vectors/v1/` (regenerate `vectors_v1.h` with `gen_vectors_header.py` after the vectors change).
 - `test/companion_ble/` runs Session, Transfer, ChunkBitmap and Outbox against in-memory ports (`FakePorts.h`, including a real SHA-256).
+
+## Security (known limitations)
+
+The GATT service is **unauthenticated and unencrypted**: `ble_hs_cfg.sm_bonding = 0`,
+`sm_mitm = 0`, `sm_sc = 0` and no characteristic carries an encryption/authentication
+permission (`BleServer::begin`). Any BLE central in range can connect, send `Hello`
+and drive the whole protocol — there is no pairing step and nothing on the link is
+confidential.
+
+What that means today, and what limits it:
+
+- **Writes and deletes are confined to an allow-list.** `Transfer::writablePath()`
+  accepts only `/.companion/…`, `/.sleep/…` and `/Brain/…` — the directories the
+  phone owns (`docs/INTEGRATION.md`) — for both `PushFile` and `DeleteFile`.
+  Everything else (`/.crosspoint/settings.json`, credentials, the user's own books,
+  caches) is refused with `Nack{5 notFound}`, which leaks nothing about what is on
+  the card. Matching is case-insensitive because FAT/exFAT is: `/BRAIN/x` and
+  `/Brain/x` are the same file, so a case-sensitive check would be theatre.
+  CrossPoint has no fixed library directory — books live anywhere on the card — so
+  no book directory is writable over the link.
+- **`Query{files}` is still rooted at `/`.** Directory listings of the whole card
+  (names and sizes, no contents) are readable by any peer in range, as are the
+  `Status` fields (battery, current book path, free heap, uptime) and every pending
+  outbox `Event` — which can contain page text, highlights and composed replies.
+- **Residual risk:** an attacker in range can read that metadata, drain the outbox
+  (and `AckEvents` it away), fill `/Brain` or `/.sleep` with junk, and delete the
+  phone's own artifacts. They cannot brick the reader's settings or its library.
+
+**TODO before the reader carries personal data** (highlights, diary, messages —
+Lanes F3/F4): require pairing + encryption. Set `sm_bonding = 1`, `sm_sc = 1`, mark
+`ctrl`/`bulk` `BLE_GATT_CHR_F_*_ENC` (and `_AUTHEN` once there is an out-of-band
+confirmation path), persist bonds through `ble_store_config`, and reject
+non-encrypted connections in `Session::handleHello`. The phone side must then hold
+the bond too (`ReaderLink`).
