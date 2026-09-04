@@ -34,6 +34,14 @@ class HalClock {
   // Returns false if RTC is not available.
   bool formatTime(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased = 48, bool use12Hour = false) const;
 
+  // Read the RTC as Unix seconds (UTC). Returns false if the RTC is absent or
+  // reports an unreliable (never set / low voltage) time.
+  bool getUnixTime(uint32_t& out) const;
+
+  // Set the RTC and the system clock from Unix seconds (UTC). Returns false if
+  // the RTC is absent or the I2C write fails.
+  bool setUnixTime(uint32_t t);
+
   // Sync the RTC from an NTP server. Requires WiFi to be connected.
   // Blocks for up to ~5s while waiting for SNTP response.
   // Returns true if the RTC was successfully updated.
