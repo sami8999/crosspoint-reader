@@ -1,0 +1,21 @@
+# X4 Pro companion fork layout (16 MB flash). Stock partitions.csv gives each OTA
+# slot 0x640000 (6.25 MiB); the stock x4pro app already fills 82% of that and
+# NimBLE + companion code do not fit reliably. Both OTA slots are grown equally to
+# 0x7C0000 (7.75 MiB) because the OTA paths require two slots of the same size:
+# network/OtaBootSwitch.cpp derives the boot slot as (ota_seq - 1) % 2, and
+# SdFirmwareUpdateActivity validates the image against
+# esp_ota_get_next_update_partition()->size. nvs/otadata/coredump keep their
+# stock offsets and sizes. spiffs is never mounted by the firmware (all state is
+# on SD under /.crosspoint) so it shrinks to a 384 KiB placeholder that keeps the
+# subtype present. Changing the table moves app1, so a device on the stock table
+# must be erased and re-flashed once (bootloader + table + app); see
+# docs/UPSTREAM_TOUCHPOINTS.md (monorepo) for the exact steps. Web flashers and
+# SD/OTA updaters built for the stock table must not be used afterwards unless
+# they read the live table from the device.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x7C0000,
+app1,     app,  ota_1,   0x7D0000, 0x7C0000,
+spiffs,   data, spiffs,  0xF90000, 0x60000,
+coredump, data, coredump,0xFF0000, 0x10000,

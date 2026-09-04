@@ -3,6 +3,7 @@
 #include <Logging.h>
 #include <WiFi.h>
 #include <esp_sntp.h>
+#include <sys/time.h>
 #include <time.h>
 
 HalClock halClock;  // Singleton instance
@@ -63,6 +64,55 @@ bool HalClock::formatTime(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHou
   } else {
     snprintf(buf, bufSize, "%02d:%02d", hour24, min);
   }
+  return true;
+}
+
+namespace {
+// Days since 1970-01-01 for a proleptic Gregorian civil date (Howard Hinnant's
+// days_from_civil); newlib on the ESP32 has no timegm().
+int64_t daysFromCivil(int y, unsigned m, unsigned d) {
+  y -= m <= 2;
+  const int64_t era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(y - era * 400);
+  const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+}  // namespace
+
+bool HalClock::getUnixTime(uint32_t& out) const {
+  if (!_available) return false;
+  Rtc::DateTime dt;
+  if (!_sdkRtc.now(dt)) return false;
+  const int64_t days = daysFromCivil(dt.year, dt.month, dt.day);
+  const int64_t secs = days * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second;
+  if (secs < 0 || secs > 0xFFFFFFFFll) return false;
+  out = static_cast<uint32_t>(secs);
+  return true;
+}
+
+bool HalClock::setUnixTime(uint32_t t) {
+  if (!_available) return false;
+  const time_t now = static_cast<time_t>(t);
+  struct tm timeinfo;
+  gmtime_r(&now, &timeinfo);
+  Rtc::DateTime dt;
+  dt.year = static_cast<uint16_t>(timeinfo.tm_year + 1900);
+  dt.month = static_cast<uint8_t>(timeinfo.tm_mon + 1);
+  dt.day = static_cast<uint8_t>(timeinfo.tm_mday);
+  dt.hour = static_cast<uint8_t>(timeinfo.tm_hour);
+  dt.minute = static_cast<uint8_t>(timeinfo.tm_min);
+  dt.second = static_cast<uint8_t>(timeinfo.tm_sec);
+  dt.weekday = static_cast<uint8_t>(timeinfo.tm_wday);
+  if (!_sdkRtc.set(dt)) return false;
+  _lastPollMs = 0;
+  _cachedHour = dt.hour;
+  _cachedMinute = dt.minute;
+  _hasCachedTime = true;
+  struct timeval tv = {now, 0};
+  settimeofday(&tv, nullptr);
+  LOG_INF("CLK", "RTC set to %04u-%02u-%02u %02u:%02u:%02u UTC", dt.year, dt.month, dt.day, dt.hour, dt.minute,
+          dt.second);
   return true;
 }
 
