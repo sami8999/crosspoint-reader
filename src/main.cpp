@@ -644,6 +644,11 @@ void loop() {
     lastActivityTime = millis();         // Reset inactivity timer
     powerManager.setPowerSaving(false);  // Restore normal CPU frequency on user activity
   }
+#if CROSSPOINT_COMPANION
+  // A transfer, a notify backlog or an owed reply counts as activity: auto-sleep
+  // would otherwise kill the link mid-task. An idle connected phone does not.
+  if (companion::wantsStayAwake()) lastActivityTime = millis();
+#endif
 
   // Let wake continue as soon as its hold has been verified. The release can
   // arrive after setup, so consume that one input frame rather than making it

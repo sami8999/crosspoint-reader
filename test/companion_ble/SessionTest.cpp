@@ -568,6 +568,40 @@ TEST(Session, PushFileRoundTrip) {
   EXPECT_EQ(f.decode<PushAck>(0, msg::kPushAck).status, PushStatus::UnknownTransfer);
 }
 
+// companion::wantsStayAwake() is built on this: it is what stops enterDeepSleep()
+// from killing a transfer or an undelivered backlog. An idle connected phone
+// deliberately does not hold the device awake.
+TEST(Session, HasPendingWorkOnlyWhileTheLinkIsBusy) {
+  Fixture f;
+  f.connectAndHello();
+  f.link.drain();
+  EXPECT_FALSE(f.session.hasPendingWork());  // connected but idle
+  std::vector<uint8_t> payload(10, 1);
+  auto sha = Sha256::digest(payload);
+  PushFile p;
+  p.path = "/.sleep/card.bmp";
+  p.size = payload.size();
+  p.sha256 = CborBytes{sha.data(), sha.size()};
+  p.chunkSize = 500;
+  p.transferId = 3;
+  f.sendFrame(msg::kPushFile, p);
+  EXPECT_TRUE(f.session.hasPendingWork());  // transfer in flight
+  f.session.tick(1000 + Transfer::kIdleTimeoutMs + 1);
+  EXPECT_FALSE(f.session.hasPendingWork());  // aborted by the idle timeout
+  // An outbox backlog counts until it has been notified.
+  f.outbox.append(EventKind::Chord, encodeChord);
+  f.session.onOutboxAppended();
+  EXPECT_TRUE(f.session.hasPendingWork());
+  f.session.tick(1000 + Transfer::kIdleTimeoutMs + 2);
+  EXPECT_FALSE(f.session.hasPendingWork());
+  // Nothing is held awake once the phone is gone.
+  f.outbox.append(EventKind::Chord, encodeChord);
+  f.session.onOutboxAppended();
+  ASSERT_TRUE(f.session.hasPendingWork());
+  f.session.onDisconnect();
+  EXPECT_FALSE(f.session.hasPendingWork());
+}
+
 TEST(Session, DisconnectAbortsTransfer) {
   Fixture f;
   f.connectAndHello();

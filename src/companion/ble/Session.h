@@ -53,7 +53,10 @@ class Session {
   // Work that must not be interrupted by auto-sleep: a transfer in flight, an
   // outbox backlog to notify, or a reply still owed to the phone.
   bool hasPendingWork() const {
-    return state_ == State::Active && (transfer_.active() || flushing_ || pending_.kind != Pending::Kind::None);
+    // flushing_ is speculative (it is set on connect and on every append), so the
+    // outbox must actually hold something for the backlog to count.
+    return state_ == State::Active &&
+           (transfer_.active() || (flushing_ && outbox_.pending() != 0) || pending_.kind != Pending::Kind::None);
   }
   uint16_t nextTxSeq() const { return txSeq_; }
 

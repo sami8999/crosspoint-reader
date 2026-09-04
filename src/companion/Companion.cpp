@@ -111,6 +111,15 @@ bool wantsFastLoop() {
   return false;
 }
 
+bool wantsStayAwake() {
+  if (!started) return false;
+  if (ble->txPending()) return true;
+  for (auto* s : sessions) {
+    if (s && s->hasPendingWork()) return true;
+  }
+  return false;
+}
+
 void prepareForSleep() {
   if (!started) return;
   for (auto* s : sessions) s->onDisconnect();

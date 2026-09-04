@@ -19,6 +19,12 @@ void loop();
 // should skip its idle delay so BLE throughput is not bound to the loop cadence.
 bool wantsFastLoop();
 
+// True while the link is mid-task and auto-sleep must not cut it short: a file
+// transfer in flight, notifications still queued, an outbox backlog to flush or a
+// reply owed to the phone. A merely connected, idle phone does NOT hold the
+// device awake - see the "Sleep" note in README.md.
+bool wantsStayAwake();
+
 // Stops BLE cleanly (host + controller) before deep sleep. Deep sleep is a chip
 // reset, so wake goes through setup() → begin() and advertising resumes there.
 void prepareForSleep();
