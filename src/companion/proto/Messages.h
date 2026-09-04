@@ -99,7 +99,7 @@ enum class TapAction : uint8_t {
 // object or static storage, not on the stack). Decode fails when a list is longer.
 constexpr size_t kMaxCardEntries = 16;
 constexpr size_t kMaxFileEntries = 128;
-constexpr size_t kMaxMissingChunks = 256;
+constexpr size_t kMaxMissingChunks = 400;  // PROTOCOL.md §2.1: <= 400 indices per PushAck
 constexpr size_t kSha256Len = 32;
 
 // ------------------------------------------------------------ shared sub-structs
