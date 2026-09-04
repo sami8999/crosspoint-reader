@@ -21,6 +21,10 @@ class Outbox {
  public:
   static constexpr size_t kMaxPayload = proto::kMaxPayloadSize;
   static constexpr size_t kMaxDirLen = 48;
+  // Pending seqs cached from one directory listing, so flushing N events costs
+  // ceil(N / kSeqCacheMax) listings instead of one per event.
+  static constexpr size_t kSeqCacheMax = 64;
+  static constexpr size_t kScratchBytes = kMaxPayload + kSeqCacheMax * sizeof(uint32_t);
   static constexpr const char* kDefaultDir = "/.companion/outbox";
 
   Outbox(FsPort& fs, SysPort& sys, const char* dir = kDefaultDir);
@@ -65,6 +69,12 @@ class Outbox {
     if (!e.encodeWith(w, ctx)) return 0;
     return commit(e.seq, scratch_, w.size()) ? e.seq : 0;
   }
+  // Loads the kSeqCacheMax smallest pending seqs greater than `after`.
+  bool refillCache(uint32_t after);
+  void invalidateCache() {
+    cacheValid_ = false;
+    cacheCount_ = 0;
+  }
   bool commit(uint32_t seq, const uint8_t* payload, size_t len);
   bool persistSeq(uint32_t seq);
   void eventPath(uint32_t seq, char* out, size_t cap) const;
@@ -74,9 +84,14 @@ class Outbox {
   FsPort& fs_;
   SysPort& sys_;
   char dir_[kMaxDirLen + 1] = {};
-  uint8_t* scratch_ = nullptr;  // kMaxPayload bytes, PSRAM on device
+  uint8_t* scratch_ = nullptr;    // kScratchBytes, PSRAM on device
+  uint32_t* seqCache_ = nullptr;  // tail of scratch_: ascending pending seqs > cacheAfter_
   uint32_t lastSeq_ = 0;
   uint32_t pending_ = 0;
+  uint32_t cacheAfter_ = 0;
+  uint16_t cacheCount_ = 0;
+  bool cacheValid_ = false;
+  bool cacheTruncated_ = false;  // more pending seqs exist beyond the cached window
 };
 
 }  // namespace companion

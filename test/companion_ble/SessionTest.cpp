@@ -502,6 +502,21 @@ TEST(Session, DeferredReplyOutranksOutboxAndIsClearedOnDisconnect) {
   EXPECT_TRUE(f.link.frames.empty());
 }
 
+// Flushing the outbox must not re-list the directory once per event.
+TEST(Session, OutboxFlushListsTheDirectoryOnlyAFewTimes) {
+  Fixture f;
+  constexpr int kEvents = 200;
+  for (int i = 0; i < kEvents; ++i) f.outbox.append(EventKind::Chord, encodeChord);
+  f.link.capacity = kEvents + 8;
+  f.connectAndHello();
+  const size_t before = f.fs.listDirCalls;
+  f.session.tick(1001);
+  EXPECT_EQ(f.link.frames.size(), static_cast<size_t>(kEvents) + 2);  // HelloAck + Status + events
+  EXPECT_LE(f.fs.listDirCalls - before, static_cast<size_t>(kEvents) / Outbox::kSeqCacheMax + 2);
+  EXPECT_EQ(f.decode<Event>(2, msg::kEvent).seq, 1u);
+  EXPECT_EQ(f.decode<Event>(kEvents + 1, msg::kEvent).seq, static_cast<uint32_t>(kEvents));
+}
+
 TEST(Session, PushFileRoundTrip) {
   Fixture f;
   f.connectAndHello();

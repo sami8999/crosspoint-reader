@@ -45,6 +45,35 @@ bool scanVisitor(void* user, const DirEntry& e) {
   return true;
 }
 
+// Collects the smallest `cap` seqs greater than `after`, ascending. The window is
+// small and inserts are rare, so an insertion sort beats sorting afterwards.
+struct CacheCollect {
+  uint32_t after;
+  uint32_t* out;
+  uint16_t cap;
+  uint16_t n;
+  bool truncated;
+};
+
+bool cacheVisitor(void* user, const DirEntry& e) {
+  auto* c = static_cast<CacheCollect*>(user);
+  uint32_t seq;
+  if (e.isDir || !parseDigits(e.name, seq) || seq <= c->after) return true;
+  if (c->n == c->cap) {
+    c->truncated = true;
+    if (seq >= c->out[c->n - 1]) return true;  // outside the window
+    --c->n;                                    // drop the largest, this one sorts below it
+  }
+  uint16_t i = c->n;
+  while (i > 0 && c->out[i - 1] > seq) {
+    c->out[i] = c->out[i - 1];
+    --i;
+  }
+  c->out[i] = seq;
+  ++c->n;
+  return true;
+}
+
 struct AckCollect {
   uint32_t upTo;
   uint32_t seqs[64];
@@ -80,13 +109,16 @@ void Outbox::seqPath(char* out, size_t cap) const { snprintf(out, cap, "%s/seq",
 
 bool Outbox::begin() {
   if (!scratch_) {
-    // One payload-sized encode buffer for the lifetime of the outbox (4 KiB, PSRAM).
-    scratch_ = static_cast<uint8_t*>(sys_.allocBig(kMaxPayload));
+    // One block for the lifetime of the outbox (PSRAM): a payload-sized encode
+    // buffer plus the 256-byte seq cache behind it.
+    scratch_ = static_cast<uint8_t*>(sys_.allocBig(kScratchBytes));
     if (!scratch_) {
-      CLOG_ERR("outbox: OOM %u", static_cast<unsigned>(kMaxPayload));
+      CLOG_ERR("outbox: OOM %u", static_cast<unsigned>(kScratchBytes));
       return false;
     }
+    seqCache_ = reinterpret_cast<uint32_t*>(scratch_ + kMaxPayload);
   }
+  invalidateCache();
   if (!fs_.mkdirs(dir_)) {
     CLOG_ERR("outbox: mkdir %s failed", dir_);
     return false;
@@ -132,6 +164,13 @@ bool Outbox::commit(uint32_t seq, const uint8_t* payload, size_t len) {
   }
   lastSeq_ = seq;
   ++pending_;
+  // The new seq is larger than every pending one, so appending keeps the cache
+  // sorted; only a full or truncated window has to be rebuilt.
+  if (cacheValid_ && !cacheTruncated_ && cacheCount_ < kSeqCacheMax && seq > cacheAfter_) {
+    seqCache_[cacheCount_++] = seq;
+  } else {
+    invalidateCache();
+  }
   return true;
 }
 
@@ -147,11 +186,32 @@ uint32_t Outbox::appendEncoded(proto::EventKind kind, const uint8_t* ctx, size_t
   return commit(e.seq, scratch_, w.size()) ? e.seq : 0;
 }
 
+bool Outbox::refillCache(uint32_t after) {
+  invalidateCache();
+  CacheCollect c{after, seqCache_, kSeqCacheMax, 0, false};
+  if (!fs_.listDir(dir_, cacheVisitor, &c)) return false;
+  cacheAfter_ = after;
+  cacheCount_ = c.n;
+  cacheTruncated_ = c.truncated;
+  cacheValid_ = true;
+  return true;
+}
+
 bool Outbox::nextAfter(uint32_t after, uint32_t& seq) {
-  ScanState s{after, 0, false, 0, 0};
-  if (!fs_.listDir(dir_, scanVisitor, &s)) return false;
-  if (!s.found) return false;
-  seq = s.best;
+  if (!seqCache_) return false;
+  // One directory listing serves the next kSeqCacheMax events of a flush; without
+  // it a session walking N events re-listed the whole directory N times.
+  if (cacheValid_ && after >= cacheAfter_) {
+    for (uint16_t i = 0; i < cacheCount_; ++i) {
+      if (seqCache_[i] > after) {
+        seq = seqCache_[i];
+        return true;
+      }
+    }
+    if (!cacheTruncated_) return false;  // the window covered every pending event
+  }
+  if (!refillCache(after) || cacheCount_ == 0) return false;
+  seq = seqCache_[0];
   return true;
 }
 
@@ -162,22 +222,31 @@ bool Outbox::read(uint32_t seq, uint8_t* buf, size_t cap, size_t& len) {
 }
 
 bool Outbox::ack(uint32_t upToSeq) {
+  if (!scratch_) return false;
+  invalidateCache();
   // Collect-then-delete in batches: deleting while iterating a FAT directory is unsafe.
+  // AckCollect is ~272 B, over the 256 B stack budget for locals (CLAUDE.md
+  // Resource Protocol rule 1), so it is staged in the PSRAM scratch. Nothing else
+  // uses the scratch during an ack.
+  static_assert(sizeof(AckCollect) <= kMaxPayload, "ack batch must fit the scratch buffer");
+  auto* c = reinterpret_cast<AckCollect*>(scratch_);
   bool ok = true;
   for (;;) {
-    AckCollect c{upToSeq, {}, 0};
-    if (!fs_.listDir(dir_, ackVisitor, &c)) return false;
-    if (c.n == 0) break;
+    c->upTo = upToSeq;
+    c->n = 0;
+    if (!fs_.listDir(dir_, ackVisitor, c)) return false;
+    if (c->n == 0) break;
+    const size_t batch = c->n;
     char path[kMaxDirLen + 24];
-    for (size_t i = 0; i < c.n; ++i) {
-      eventPath(c.seqs[i], path, sizeof(path));
+    for (size_t i = 0; i < batch; ++i) {
+      eventPath(c->seqs[i], path, sizeof(path));
       if (fs_.remove(path)) {
         if (pending_) --pending_;
       } else {
         ok = false;
       }
     }
-    if (c.n < sizeof(c.seqs) / sizeof(c.seqs[0]) || !ok) break;
+    if (batch < sizeof(c->seqs) / sizeof(c->seqs[0]) || !ok) break;
   }
   return ok;
 }

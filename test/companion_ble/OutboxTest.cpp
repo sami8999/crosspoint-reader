@@ -132,6 +132,79 @@ TEST(Outbox, AckBatchesBeyond64Entries) {
   EXPECT_EQ(seq, 141u);
 }
 
+// nextAfter() used to re-list the whole directory for every event, making a
+// flush O(N^2) in SD reads. One listing now serves kSeqCacheMax events.
+TEST(Outbox, NextAfterWalksTheWholeLogWithFewListings) {
+  FakeFs fs;
+  FakeSys sys;
+  Outbox o(fs, sys);
+  ASSERT_TRUE(o.begin());
+  constexpr uint32_t kEvents = 200;
+  for (uint32_t i = 0; i < kEvents; ++i) o.append(EventKind::Tap, encodeTap);
+  const size_t before = fs.listDirCalls;
+  uint32_t cursor = 0;
+  uint32_t seen = 0;
+  for (uint32_t seq; o.nextAfter(cursor, seq);) {
+    EXPECT_EQ(seq, cursor + 1);
+    cursor = seq;
+    ++seen;
+  }
+  EXPECT_EQ(seen, kEvents);
+  const size_t listings = fs.listDirCalls - before;
+  EXPECT_LE(listings, kEvents / Outbox::kSeqCacheMax + 2);
+  EXPECT_GT(listings, 0u);
+}
+
+// A hole in the sequence (an event file lost to a crash between the seq write
+// and the event write) must not stop the walk: probing seq+1 alone would.
+TEST(Outbox, NextAfterSkipsGaps) {
+  FakeFs fs;
+  FakeSys sys;
+  {
+    Outbox o(fs, sys);
+    ASSERT_TRUE(o.begin());
+    for (int i = 0; i < 3; ++i) o.append(EventKind::Tap, encodeTap);
+  }
+  fs.files.erase("/.companion/outbox/0000000002.evt");
+  Outbox o2(fs, sys);
+  ASSERT_TRUE(o2.begin());
+  uint32_t seq = 0;
+  ASSERT_TRUE(o2.nextAfter(0, seq));
+  EXPECT_EQ(seq, 1u);
+  ASSERT_TRUE(o2.nextAfter(1, seq));
+  EXPECT_EQ(seq, 3u);
+  EXPECT_FALSE(o2.nextAfter(3, seq));
+}
+
+// Appends land in the cache, acks invalidate it.
+TEST(Outbox, SeqCacheTracksAppendsAndAcks) {
+  FakeFs fs;
+  FakeSys sys;
+  Outbox o(fs, sys);
+  ASSERT_TRUE(o.begin());
+  for (int i = 0; i < 3; ++i) o.append(EventKind::Tap, encodeTap);
+  uint32_t seq = 0;
+  ASSERT_TRUE(o.nextAfter(2, seq));
+  EXPECT_EQ(seq, 3u);
+  o.append(EventKind::Tap, encodeTap);
+  ASSERT_TRUE(o.nextAfter(3, seq));
+  EXPECT_EQ(seq, 4u);  // visible without a rescan
+  EXPECT_TRUE(o.ack(3));
+  EXPECT_FALSE(o.nextAfter(4, seq));
+  ASSERT_TRUE(o.nextAfter(0, seq));
+  EXPECT_EQ(seq, 4u);  // the acked prefix is gone from the cache too
+  // More pending events than one cache window: the walk still reaches them all.
+  for (uint32_t i = 0; i < Outbox::kSeqCacheMax * 2; ++i) o.append(EventKind::Tap, encodeTap);
+  uint32_t cursor = 0;
+  uint32_t last = 0;
+  for (uint32_t s; o.nextAfter(cursor, s);) {
+    EXPECT_GT(s, cursor);
+    cursor = s;
+    last = s;
+  }
+  EXPECT_EQ(last, o.lastSeq());
+}
+
 TEST(Outbox, WriteFailureConsumesSeq) {
   FakeFs fs;
   FakeSys sys;
