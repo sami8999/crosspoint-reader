@@ -41,6 +41,7 @@ void Session::onConnect(uint32_t nowMs) {
   lastPollMs_ = nowMs;
   flushing_ = false;
   flushCursor_ = 0;
+  pending_.kind = Pending::Kind::None;
   lastBook_[0] = '\0';
   transfer_.abort();
 }
@@ -49,6 +50,7 @@ void Session::onDisconnect() {
   transfer_.abort();
   state_ = State::Idle;
   flushing_ = false;
+  pending_.kind = Pending::Kind::None;
 }
 
 void Session::onOutboxAppended() {
@@ -64,25 +66,45 @@ size_t Session::maxFrameForMtu(uint16_t mtu) {
 }
 
 template <class M>
-bool Session::send(uint8_t type, const M& m) {
-  if (!tx_ || state_ == State::Idle) return false;
+Session::SendResult Session::send(uint8_t type, const M& m) {
+  if (!tx_ || state_ == State::Idle) return SendResult::EncodeFailed;
   size_t len = 0;
   if (!encodeFrame(type, txSeq_, m, tx_, maxFrame(), len)) {
-    CLOG_ERR("session: encode 0x%02X failed", type);
-    return false;
+    CLOG_DBG("session: 0x%02X does not fit the frame ceiling at MTU %u", type, link_.mtu());
+    return SendResult::EncodeFailed;
   }
-  if (!link_.send(tx_, len)) {
-    CLOG_ERR("session: tx queue full, dropped 0x%02X", type);
-    return false;
-  }
+  if (!link_.send(tx_, len)) return SendResult::QueueFull;
   ++txSeq_;
-  return true;
+  return SendResult::Ok;
+}
+
+// The single deferred-reply slot. A second deferral overwrites the first: the
+// ring holds kTxSlots frames, so two replies can only pile up when the phone has
+// stopped draining notifications entirely, and the newer answer is the useful one.
+void Session::defer(Pending::Kind kind, uint16_t seq, NackCode code, const char* msgText) {
+  if (pending_.kind != Pending::Kind::None) {
+    CLOG_ERR("session: tx ring full, deferred reply for seq %u replaced", static_cast<unsigned>(pending_.seq));
+  }
+  pending_ = Pending{kind, seq, code, msgText};
+}
+
+void Session::flushPending() {
+  if (pending_.kind == Pending::Kind::None || !link_.canSend()) return;
+  const Pending p = pending_;
+  pending_.kind = Pending::Kind::None;  // the senders below re-defer if the ring filled again
+  switch (p.kind) {
+    case Pending::Kind::Ack: sendAck(p.seq); break;
+    case Pending::Kind::Nack: sendNack(p.seq, p.code, p.msg); break;
+    case Pending::Kind::PushAck: sendPushAck(); break;
+    case Pending::Kind::Files: sendFilesReply(p.seq); break;
+    case Pending::Kind::None: break;
+  }
 }
 
 void Session::sendAck(uint16_t seq) {
   Ack a;
   a.seq = seq;
-  send(msg::kAckFromReader, a);
+  if (send(msg::kAckFromReader, a) == SendResult::QueueFull) defer(Pending::Kind::Ack, seq);
 }
 
 void Session::sendNack(uint16_t seq, NackCode code, const char* msgText) {
@@ -90,7 +112,11 @@ void Session::sendNack(uint16_t seq, NackCode code, const char* msgText) {
   n.seq = seq;
   n.code = code;
   if (msgText) n.msg = std::string_view(msgText);
-  send(msg::kNackFromReader, n);
+  if (send(msg::kNackFromReader, n) == SendResult::QueueFull) defer(Pending::Kind::Nack, seq, code, msgText);
+}
+
+void Session::sendPushAck() {
+  if (send(msg::kPushAck, pushAck_) == SendResult::QueueFull) defer(Pending::Kind::PushAck, 0);
 }
 
 bool Session::bookChanged(uint32_t& permille) {
@@ -114,7 +140,7 @@ void Session::sendStatus(uint32_t nowMs) {
   s.freeHeap = sys_.freeHeap();
   s.outboxCount = outbox_.pending();
   s.uptime = sys_.uptimeSeconds();
-  if (send(msg::kStatus, s)) {
+  if (send(msg::kStatus, s) == SendResult::Ok) {
     lastStatusMs_ = nowMs;
     lastBattery_ = s.battery;
     strncpy(lastBook_, bookBuf_, sizeof(lastBook_) - 1);
@@ -202,7 +228,7 @@ void Session::handleHello(const FrameView& f) {
       CLOG_INF("session: clock set from phone (delta %ld s)", static_cast<long>(ack.clockDelta));
     }
   }
-  if (!send(msg::kHelloAck, ack)) return;
+  if (send(msg::kHelloAck, ack) != SendResult::Ok) return;
   state_ = State::Active;
   CLOG_INF("session: hello from %.*s", static_cast<int>(h.app.size()), h.app.data());
   sendStatus(lastStatusMs_);
@@ -271,8 +297,21 @@ void Session::handleFiles(uint16_t seq, const char* path) {
     sendNack(seq, NackCode::NotFound);
     return;
   }
-  // Trim until the frame fits at the negotiated MTU (~130 short names at 4 KiB).
-  while (!send(msg::kFiles, files_)) {
+  sendFilesReply(seq);
+}
+
+// Trims until the frame fits at the negotiated MTU (~130 short names at 4 KiB).
+// Only an encode overflow justifies trimming: a full TX ring says nothing about
+// the size of the listing, and trimming for it would shrink the reply to nothing
+// and then fail the Nack the same way. That case is deferred instead.
+void Session::sendFilesReply(uint16_t seq) {
+  for (;;) {
+    const SendResult r = send(msg::kFiles, files_);
+    if (r == SendResult::Ok) return;
+    if (r == SendResult::QueueFull) {
+      defer(Pending::Kind::Files, seq);
+      return;
+    }
     if (files_.entryCount == 0) {
       sendNack(seq, NackCode::IoError);
       return;
@@ -311,7 +350,7 @@ void Session::handlePushEnd(const FrameView& f) {
     return;
   }
   transfer_.end(e.transferId, pushAck_);
-  send(msg::kPushAck, pushAck_);
+  sendPushAck();
 }
 
 void Session::handleDeleteFile(const FrameView& f) {
@@ -392,6 +431,7 @@ void Session::pumpOutbox() {
 void Session::tick(uint32_t nowMs) {
   if (state_ != State::Active) return;
   transfer_.tick(nowMs);
+  flushPending();  // a reply owed to the phone outranks Status and the outbox
   if (nowMs - lastStatusMs_ >= kStatusIntervalMs) {
     sendStatus(nowMs);
   } else if (nowMs - lastPollMs_ >= kChangePollMs) {
@@ -401,7 +441,7 @@ void Session::tick(uint32_t nowMs) {
     uint32_t permille;
     if (diff >= kBatteryDeltaPct || bookChanged(permille)) sendStatus(nowMs);
   }
-  pumpOutbox();
+  if (pending_.kind == Pending::Kind::None) pumpOutbox();
 }
 
 }  // namespace companion

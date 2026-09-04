@@ -397,6 +397,111 @@ TEST(Session, OutboxFlushRespectsQueueCapacity) {
   EXPECT_EQ(f.decode<Event>(2, msg::kEvent).seq, 4u);
 }
 
+// PROTOCOL.md 2.1: every command must produce a reply. A full TX ring is
+// transient, so the reply is deferred and retried rather than dropped - a lost
+// PushAck used to strand the transfer in active_ for the whole 60 s idle timeout
+// and Nack every later PushFile as busy.
+TEST(Session, RepliesAreDeferredWhileTheTxRingIsFull) {
+  Fixture f;
+  f.connectAndHello();
+  ASSERT_EQ(f.link.frames.size(), 2u);
+  f.link.capacity = 2;  // ring full: nothing more can be queued
+  std::vector<uint8_t> payload(10, 1);
+  auto sha = Sha256::digest(payload);
+  PushFile p;
+  p.path = "/.sleep/card.bmp";
+  p.size = payload.size();
+  p.sha256 = CborBytes{sha.data(), sha.size()};
+  p.chunkSize = 500;
+  p.transferId = 7;
+  f.sendFrame(msg::kPushFile, p);
+  EXPECT_EQ(f.link.frames.size(), 2u);  // the Ack did not fit
+  EXPECT_TRUE(f.session.transferActive());
+  EXPECT_TRUE(f.session.hasPendingWork());
+  f.session.tick(1001);
+  EXPECT_EQ(f.link.frames.size(), 2u);  // still full
+  f.link.drain();                       // the phone catches up
+  f.session.tick(1002);
+  ASSERT_EQ(f.link.frames.size(), 1u);
+  EXPECT_EQ(f.decode<Ack>(0, msg::kAckFromReader).seq, f.phoneSeq - 1);
+  f.link.drain();
+
+  // Same for PushAck: without the retry the transfer would stay active_ until
+  // the idle timeout and every later PushFile would be Nacked busy.
+  uint8_t chunk[2 + 10];
+  encodeBulkChunkHeader(0, chunk);
+  memcpy(chunk + 2, payload.data(), payload.size());
+  f.session.onBulkChunk(chunk, 2 + payload.size(), 1002);
+  f.link.capacity = 0;
+  PushEnd e;
+  e.transferId = 7;
+  f.sendFrame(msg::kPushEnd, e);
+  EXPECT_TRUE(f.link.frames.empty());
+  f.link.capacity = 8;
+  f.session.tick(1003);
+  ASSERT_EQ(f.link.frames.size(), 1u);
+  PushAck ack = f.decode<PushAck>(0, msg::kPushAck);
+  EXPECT_EQ(ack.status, PushStatus::Ok);
+  EXPECT_EQ(ack.transferId, 7u);
+  EXPECT_FALSE(f.session.hasPendingWork());
+  EXPECT_EQ(f.fs.files["/.sleep/card.bmp"], payload);
+}
+
+// A full ring is not an encode overflow: trimming the listing for it would empty
+// it and then fail the Nack the same way.
+TEST(Session, FilesReplyIsDeferredNotTrimmedWhenTheRingIsFull) {
+  Fixture f;
+  f.fs.mkdirs("/Books");
+  for (int i = 0; i < 12; ++i) {
+    char name[64];
+    snprintf(name, sizeof(name), "/Books/book-%02d.epub", i);
+    f.fs.files[name] = {};
+  }
+  f.connectAndHello();
+  f.link.capacity = 2;
+  Query q;
+  q.what = QueryWhat::Files;
+  q.path = std::string_view("/Books");
+  f.sendFrame(msg::kQuery, q);
+  EXPECT_EQ(f.link.frames.size(), 2u);  // deferred, and no Nack
+  f.link.drain();
+  f.link.capacity = 8;
+  f.session.tick(1001);
+  ASSERT_EQ(f.link.frames.size(), 1u);
+  Files files = f.decode<Files>(0, msg::kFiles);
+  EXPECT_EQ(files.entryCount, 12u);  // nothing was trimmed
+}
+
+// A deferred reply is sent before outbox events, and is dropped on disconnect.
+TEST(Session, DeferredReplyOutranksOutboxAndIsClearedOnDisconnect) {
+  Fixture f;
+  f.outbox.append(EventKind::Chord, encodeChord);
+  f.connectAndHello();
+  f.link.capacity = 2;
+  AckEvents a;
+  a.upToSeq = 0;
+  f.sendFrame(msg::kAckEvents, a);
+  EXPECT_TRUE(f.session.hasPendingWork());
+  f.link.drain();
+  f.link.capacity = 1;  // room for exactly one frame
+  f.session.tick(1001);
+  ASSERT_EQ(f.link.frames.size(), 1u);
+  f.decode<Ack>(0, msg::kAckFromReader);  // the Ack, not the event
+  f.link.capacity = 8;
+  f.session.tick(1002);
+  ASSERT_EQ(f.link.frames.size(), 2u);
+  EXPECT_EQ(f.decode<Event>(1, msg::kEvent).seq, 1u);
+  f.link.drain();
+  f.link.capacity = 0;
+  f.sendFrame(msg::kAckEvents, a);
+  EXPECT_TRUE(f.session.hasPendingWork());
+  f.session.onDisconnect();
+  EXPECT_FALSE(f.session.hasPendingWork());
+  f.link.capacity = 8;
+  f.session.tick(1003);
+  EXPECT_TRUE(f.link.frames.empty());
+}
+
 TEST(Session, PushFileRoundTrip) {
   Fixture f;
   f.connectAndHello();

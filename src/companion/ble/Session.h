@@ -50,13 +50,41 @@ class Session {
   State state() const { return state_; }
   bool active() const { return state_ == State::Active; }
   bool transferActive() const { return transfer_.active(); }
+  // Work that must not be interrupted by auto-sleep: a transfer in flight, an
+  // outbox backlog to notify, or a reply still owed to the phone.
+  bool hasPendingWork() const {
+    return state_ == State::Active && (transfer_.active() || flushing_ || pending_.kind != Pending::Kind::None);
+  }
   uint16_t nextTxSeq() const { return txSeq_; }
 
  private:
+  // A failed send() is either an encode overflow (the message does not fit the
+  // frame ceiling at this MTU) or a full TX ring (transient). The two need
+  // opposite handling, so they are reported apart.
+  enum class SendResult : uint8_t { Ok, EncodeFailed, QueueFull };
+
+  // PROTOCOL.md 2.1 makes a reply mandatory, but the TX ring can be full when the
+  // command arrives. One reply per session is remembered and rebuilt from tick()
+  // instead of being dropped - a lost PushAck would otherwise strand the transfer
+  // in `active_` until the 60 s idle timeout, Nacking every PushFile as busy.
+  struct Pending {
+    enum class Kind : uint8_t { None, Ack, Nack, PushAck, Files };
+    Kind kind = Kind::None;
+    uint16_t seq = 0;
+    proto::NackCode code = proto::NackCode::BadPayload;
+    const char* msg = nullptr;  // string literal or nullptr; never owned
+  };
+
   template <class M>
-  bool send(uint8_t type, const M& m);
+  SendResult send(uint8_t type, const M& m);
   void sendAck(uint16_t seq);
   void sendNack(uint16_t seq, proto::NackCode code, const char* msg = nullptr);
+  void sendPushAck();
+  // Sends files_, trimming entries until the frame fits; defers on a full ring.
+  void sendFilesReply(uint16_t seq);
+  void defer(Pending::Kind kind, uint16_t seq, proto::NackCode code = proto::NackCode::BadPayload,
+             const char* msg = nullptr);
+  void flushPending();
   void sendStatus(uint32_t nowMs);
   void handleHello(const proto::FrameView& f);
   void handleQuery(const proto::FrameView& f);
@@ -89,6 +117,7 @@ class Session {
 
   bool flushing_ = false;
   uint32_t flushCursor_ = 0;
+  Pending pending_;
 
   // Large message structs live here (Session itself is PSRAM-allocated).
   proto::Files files_;
