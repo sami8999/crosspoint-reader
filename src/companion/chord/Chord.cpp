@@ -84,11 +84,17 @@ Tick Detector::update(const bool leftDown, const bool rightDown, const uint32_t 
 
 PageTurn Detector::filterPageTurn(const PageTurn& in, const bool fromChordButton, const uint32_t nowMs) {
   // A turn already held: release it once its window expires, or drop it if the
-  // chord fired in the meantime (update() clears pending_ on fire).
-  if (hasPendingTurn() && nowMs - pendingSinceMs_ >= cfg_.pairWindowMs) {
-    const PageTurn due = pending_;
-    pending_ = PageTurn{};
-    return due;
+  // chord fired in the meantime (update() clears pending_ on fire) or the
+  // screen that wanted it stopped asking.
+  if (hasPendingTurn()) {
+    const uint32_t age = nowMs - pendingSinceMs_;
+    if (age >= cfg_.staleTurnMs) {
+      pending_ = PageTurn{};
+    } else if (age >= cfg_.pairWindowMs) {
+      const PageTurn due = pending_;
+      pending_ = PageTurn{};
+      return due;
+    }
   }
 
   if (!in.prev && !in.next) return PageTurn{};

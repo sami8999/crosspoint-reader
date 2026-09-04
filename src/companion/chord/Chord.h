@@ -29,6 +29,11 @@ struct Config {
   uint32_t holdMs = 180;         // both buttons down this long -> fire
   uint32_t pairWindowMs = 200;   // a lone page button waits this long for its partner
   uint32_t releaseLockoutMs = 400;  // after the combo lifts, ignore bounce for this long
+  // A held page turn is only handed back if the reader comes asking within this
+  // long after its window opened. Past it the turn is dropped: the screen that
+  // asked for it is gone (the reader closed, an overlay took over), and firing
+  // it into whatever is on screen now would turn a page nobody asked for.
+  uint32_t staleTurnMs = 800;
 };
 
 enum class State : uint8_t {
@@ -110,7 +115,11 @@ struct ChordContext {
   static constexpr size_t kPageTextCap = 2048;
   static constexpr size_t kBookCap = 127;
   static constexpr size_t kXpathCap = 191;
-  static constexpr size_t kScreenCap = 15;
+  // "screen" is the name of the screen the chord came from ("epub", "home",
+  // "brain:todos"). ComposeActivity's dictate affordance names itself
+  // "compose:<target>" so the phone can route the transcript straight into a
+  // Compose reply instead of guessing, which is why this is not 15 bytes.
+  static constexpr size_t kScreenCap = 63;
 
   char screen[kScreenCap + 1] = "home";
   char book[kBookCap + 1] = {};

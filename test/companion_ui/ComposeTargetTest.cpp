@@ -106,5 +106,38 @@ TEST(ComposeTarget, AnUnparsedTargetFormatsToNothing) {
   EXPECT_FALSE(t.format(out, sizeof(out)));
 }
 
+TEST(ComposeTarget, DerivesTheTargetFromTheListId) {
+  ComposeTarget t;
+  ASSERT_TRUE(composeTargetForList("inbox", "th-1", t));
+  EXPECT_EQ(ComposeKind::Thread, t.kind);
+  EXPECT_STREQ("th-1", t.id);
+  ASSERT_TRUE(composeTargetForList("todos", "rem-1", t));
+  EXPECT_EQ(ComposeKind::Todo, t.kind);
+  ASSERT_TRUE(composeTargetForList("diary", "2026-09-04", t));
+  EXPECT_EQ(ComposeKind::Diary, t.kind);
+  ASSERT_TRUE(composeTargetForList("notes", "n1", t));
+  EXPECT_EQ(ComposeKind::Note, t.kind);
+  ASSERT_TRUE(composeTargetForList("people", "p1", t));
+  EXPECT_EQ(ComposeKind::Person, t.kind);
+}
+
+TEST(ComposeTarget, AListIdWithNoComposeRouteIsRefused) {
+  ComposeTarget t;
+  EXPECT_FALSE(composeTargetForList("stats", "x", t));
+  EXPECT_FALSE(composeTargetForList("", "x", t));
+  EXPECT_FALSE(composeTargetForList(nullptr, "x", t));
+  EXPECT_FALSE(composeTargetForList("todos", nullptr, t));
+}
+
+TEST(ComposeTarget, ADerivedTargetGetsTheSameValidationAsAParsedOne) {
+  ComposeTarget t;
+  // A diary list whose item id is not a date has nowhere to go.
+  EXPECT_FALSE(composeTargetForList("diary", "yesterday", t));
+  // Item ids are printable-ASCII-no-space by the format; one that is not must
+  // not become a target either.
+  EXPECT_FALSE(composeTargetForList("todos", "a b", t));
+  EXPECT_FALSE(composeTargetForList("inbox", "a:b", t));
+}
+
 }  // namespace
 }  // namespace companion::brain

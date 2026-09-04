@@ -356,6 +356,12 @@ ScreenshotInfo ActivityManager::getScreenshotInfo() const {
   return {};
 }
 
+#if CROSSPOINT_COMPANION
+bool ActivityManager::fillChordContext(companion::chord::ChordContext& ctx) {
+  return currentActivity && currentActivity->fillChordContext(ctx);
+}
+#endif
+
 void ActivityManager::requestUpdate(bool immediate) {
   if (immediate) {
     if (renderTaskHandle) {

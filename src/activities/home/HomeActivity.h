@@ -40,6 +40,10 @@ class HomeActivity final : public Activity {
     ++i;
     if (item == HomeMenuItem::OPDS_BROWSER) return hasOpdsUrl ? i : 0;
     if (hasOpdsUrl) ++i;
+#if CROSSPOINT_COMPANION
+    if (item == HomeMenuItem::BRAIN) return i;
+    ++i;
+#endif
     if (item == HomeMenuItem::FILE_TRANSFER) return i;
     ++i;
     if (item == HomeMenuItem::SETTINGS_MENU) return i;
@@ -52,6 +56,9 @@ class HomeActivity final : public Activity {
     if (idx == i++) return HomeMenuItem::FILE_BROWSER;
     if (idx == i++) return HomeMenuItem::RECENTS;
     if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
+#if CROSSPOINT_COMPANION
+    if (idx == i++) return HomeMenuItem::BRAIN;
+#endif
     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
     return HomeMenuItem::NONE;
@@ -62,6 +69,10 @@ class HomeActivity final : public Activity {
   void onSettingsOpen();
   void onFileTransferOpen();
   void onOpdsBrowserOpen();
+#if CROSSPOINT_COMPANION
+  // Fork hook (docs/UPSTREAM_TOUCHPOINTS.md): opens the phone's lists.
+  void onBrainOpen();
+#endif
 
   int getMenuItemCount() const;
   bool storeCoverBuffer();    // Store frame buffer for cover image

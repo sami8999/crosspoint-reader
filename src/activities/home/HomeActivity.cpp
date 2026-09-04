@@ -21,9 +21,16 @@
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#if CROSSPOINT_COMPANION
+#include "companion/Companion.h"
+#endif
 
 int HomeActivity::getMenuItemCount() const {
+#if CROSSPOINT_COMPANION
+  int count = 5;  // File Browser, Recents, Brain, File transfer, Settings
+#else
   int count = 4;  // File Browser, Recents, File transfer, Settings
+#endif
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -188,6 +195,11 @@ void HomeActivity::loop() {
       case HomeMenuItem::OPDS_BROWSER:
         onOpdsBrowserOpen();
         break;
+#if CROSSPOINT_COMPANION
+      case HomeMenuItem::BRAIN:
+        onBrainOpen();
+        break;
+#endif
       case HomeMenuItem::FILE_TRANSFER:
         onFileTransferOpen();
         break;
@@ -310,11 +322,17 @@ void HomeActivity::render(RenderLock&&) {
   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_MENU_RECENT_BOOKS), tr(STR_FILE_TRANSFER),
                                         tr(STR_SETTINGS_TITLE)};
   std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Settings};
-
   if (hasOpdsServers) {
     menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
     menuIcons.insert(menuIcons.begin() + 2, Library);
   }
+#if CROSSPOINT_COMPANION
+  // Fork hook (docs/UPSTREAM_TOUCHPOINTS.md): after the optional OPDS row, to
+  // match indexToMenuItem(). A literal label, deliberately - adding a StrId
+  // would touch the i18n catalogue in every language file.
+  menuItems.insert(menuItems.begin() + (hasOpdsServers ? 3 : 2), "Brain");
+  menuIcons.insert(menuIcons.begin() + (hasOpdsServers ? 3 : 2), Book);
+#endif
 
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
     // Insert Continue Reading at the top if enabled in theme
@@ -358,3 +376,7 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+
+#if CROSSPOINT_COMPANION
+void HomeActivity::onBrainOpen() { companion::openBrain(); }
+#endif

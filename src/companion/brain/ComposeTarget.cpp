@@ -92,6 +92,42 @@ bool ComposeTarget::parse(const char* text, ComposeTarget& out) {
   return true;
 }
 
+bool composeTargetForList(const char* listId, const char* itemId, ComposeTarget& out) {
+  out.kind = ComposeKind::Unknown;
+  out.id[0] = '\0';
+  if (!listId || !itemId) return false;
+
+  static constexpr struct {
+    const char* prefix;
+    ComposeKind kind;
+  } kMap[] = {
+      {"inbox", ComposeKind::Thread}, {"thread", ComposeKind::Thread}, {"todo", ComposeKind::Todo},
+      {"diary", ComposeKind::Diary},  {"note", ComposeKind::Note},     {"people", ComposeKind::Person},
+      {"person", ComposeKind::Person},
+  };
+  ComposeKind kind = ComposeKind::Unknown;
+  for (const auto& m : kMap) {
+    const size_t n = strlen(m.prefix);
+    if (strncmp(listId, m.prefix, n) == 0) {
+      kind = m.kind;
+      break;
+    }
+  }
+  if (kind == ComposeKind::Unknown) return false;
+
+  // Round-trip through parse() so the id gets the same validation a target off
+  // the wire would: no spaces, no second colon, no over-long ids.
+  char text[ComposeTarget::kMaxText + 1];
+  const char* name = composeKindName(kind);
+  const size_t nameLen = strlen(name);
+  const size_t idLen = strlen(itemId);
+  if (nameLen + 1 + idLen + 1 > sizeof(text)) return false;
+  memcpy(text, name, nameLen);
+  text[nameLen] = ':';
+  memcpy(text + nameLen + 1, itemId, idLen + 1);
+  return ComposeTarget::parse(text, out);
+}
+
 bool ComposeTarget::format(char* out, const size_t cap) const {
   const char* name = composeKindName(kind);
   if (!name || !out) return false;

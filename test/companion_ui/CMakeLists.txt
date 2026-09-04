@@ -1,5 +1,6 @@
 add_executable(CompanionUiTest
   ListFileTest.cpp
+  ListStoreTest.cpp
   ComposeTargetTest.cpp
   ChordTest.cpp
   OutboxEventsTest.cpp
@@ -8,6 +9,7 @@ add_executable(CompanionUiTest
   ${REPO_ROOT}/src/companion/proto/Messages.cpp
   ${REPO_ROOT}/src/companion/store/Outbox.cpp
   ${REPO_ROOT}/src/companion/brain/ListFile.cpp
+  ${REPO_ROOT}/src/companion/brain/ListStore.cpp
   ${REPO_ROOT}/src/companion/brain/ComposeTarget.cpp
   ${REPO_ROOT}/src/companion/chord/Chord.cpp
 )

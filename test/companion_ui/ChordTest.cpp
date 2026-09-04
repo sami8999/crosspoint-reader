@@ -203,6 +203,20 @@ TEST(Chord, AnAbortedComboStillDeliversItsPageTurn) {
   EXPECT_TRUE(det.filterPageTurn({}, false, now).prev);
 }
 
+TEST(Chord, DropsAPageTurnNobodyCameBackFor) {
+  // The reader that asked closed (or an overlay took the input) before the
+  // window expired. Firing the held turn into whatever screen is up now would
+  // be a page turn out of nowhere, so it is dropped instead.
+  Detector det;
+  uint32_t now = 1000;
+  ASSERT_FALSE(det.filterPageTurn({true, false}, true, now).prev);
+  now += kCfg.staleTurnMs + 10;
+  const PageTurn out = det.filterPageTurn({}, false, now);
+  EXPECT_FALSE(out.prev);
+  EXPECT_FALSE(out.next);
+  EXPECT_FALSE(det.hasPendingTurn());
+}
+
 // ------------------------------------------------------------------ context
 
 TEST(ChordContext, TruncatesOnAUtf8Boundary) {

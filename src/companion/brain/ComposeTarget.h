@@ -47,6 +47,13 @@ struct ComposeTarget {
   bool format(char* out, size_t cap) const;
 };
 
+// List files carry no target field, so the list id is the contract: the phone
+// names each list after the record type it routes taps back to. Recognised
+// prefixes are inbox/thread -> thread, todo -> todo, diary -> diary, note ->
+// note, people/person -> person. Anything else has no Compose route and the
+// reader must say so rather than guess a destination.
+bool composeTargetForList(const char* listId, const char* itemId, ComposeTarget& out);
+
 }  // namespace companion::brain
 
 #endif  // CROSSPOINT_COMPANION

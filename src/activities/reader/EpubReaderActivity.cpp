@@ -31,6 +31,9 @@
 #include "KOReaderSyncActivity.h"
 #include "MappedInputManager.h"
 #include "ProgressMapper.h"
+#if CROSSPOINT_COMPANION
+#include "companion/chord/ChordCapture.h"
+#endif
 #include "QrDisplayActivity.h"
 #include "ReaderActivity.h"
 #include "ReaderFontSizes.h"
@@ -2544,6 +2547,58 @@ void EpubReaderActivity::updateBookmarkFlag() {
     return bookmarkMatchesProgress(b, currentSpineIndex, section->currentPage, pageCount, pageRange);
   });
 }
+
+#if CROSSPOINT_COMPANION
+bool EpubReaderActivity::fillChordContext(companion::chord::ChordContext& ctx) {
+  if (!epub || !section) return false;
+  ctx.setScreen("epub");
+  ctx.setBook(epub->getPath().c_str());
+  ctx.hasSpine = true;
+  ctx.spine = static_cast<uint32_t>(std::max(0, currentSpineIndex));
+
+  int currentPage;
+  {
+    // section->currentPage is written by the render task on a page turn.
+    RenderLock lock;
+    currentPage = section->currentPage;
+  }
+  ctx.hasPage = true;
+  ctx.page = static_cast<uint32_t>(currentPage + 1);  // 1-based, like ScreenshotInfo
+
+  // The anchor is exactly what a bookmark on this page would store, so the
+  // phone can point back at the passage after a re-pagination.
+  const SavedProgressPosition progress = ProgressMapper::toSavedProgress(epub, getCurrentPosition());
+  if (!progress.xpath.empty()) {
+    ctx.setXpath(progress.xpath.c_str());
+    ctx.anchorSpine = ctx.spine;
+    const std::optional<uint32_t> offset =
+        (currentPage == section->currentPage && currentPageVisibleOffset.has_value())
+            ? currentPageVisibleOffset
+        : (currentPage >= 0 && currentPage < section->pageCount)
+            ? section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage))
+            : std::nullopt;
+    ctx.anchorOffset = offset.value_or(0);
+    ctx.hasAnchor = true;
+  }
+
+  // The words actually on screen, in reading order - the same walk
+  // DictionaryWordSelectActivity does over the laid-out page, so what the phone
+  // reads is what the user is looking at, not the whole chapter.
+  if (auto page = section->loadPage(currentPage)) {
+    companion::chord::PageTextSink sink(ctx);
+    for (const auto& element : page->elements) {
+      if (sink.full()) break;
+      if (element->getTag() != TAG_PageLine) continue;
+      const auto* line = static_cast<const PageLine*>(element.get());
+      const auto& block = line->getBlock();
+      if (!block || !block->valid()) continue;
+      for (uint16_t i = 0; i < block->wordCount(); i++) sink.addWord(block->wordText(i));
+      sink.lineBreak();
+    }
+  }
+  return true;
+}
+#endif
 
 ScreenshotInfo EpubReaderActivity::getScreenshotInfo() const {
   ScreenshotInfo info;
