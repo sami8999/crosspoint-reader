@@ -110,6 +110,13 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   if (keyboardLayouts != 0) {
     doc["keyboardLayouts"] = keyboardLayouts;
   }
+
+#if CROSSPOINT_COMPANION
+  // Companion scheduled card wake — persisted only, no Settings-screen entry.
+  doc["companionScheduledWake"] = companionScheduledWake;
+  doc["companionDailyWakeMin"] = companionDailyWakeMin;
+  doc["companionWakeWindowS"] = companionWakeWindowS;
+#endif
 }
 
 bool CrossPointSettings::fromJson(JsonVariantConst doc) {
@@ -185,6 +192,16 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     sleepTimeoutMinutes = sleepTimeoutEnumToMinutes(legacyValue);
     needsResave = true;
   }
+#if CROSSPOINT_COMPANION
+  // Companion scheduled card wake — persisted only, no Settings-screen entry.
+  companionScheduledWake =
+      clamp(doc["companionScheduledWake"] | (uint8_t)COMPANION_WAKE_AUTO, 3, (uint8_t)COMPANION_WAKE_AUTO);
+  companionDailyWakeMin = doc["companionDailyWakeMin"] | (uint16_t)(6 * 60);
+  companionWakeWindowS = doc["companionWakeWindowS"] | (uint16_t)120;
+  if (companionWakeWindowS < 15) companionWakeWindowS = 15;
+  if (companionWakeWindowS > 600) companionWakeWindowS = 600;
+#endif
+
   // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
   frontButtonBack = clamp(doc["frontButtonBack"] | (uint8_t)FRONT_HW_BACK, FRONT_BUTTON_HARDWARE_COUNT, FRONT_HW_BACK);
   frontButtonConfirm =

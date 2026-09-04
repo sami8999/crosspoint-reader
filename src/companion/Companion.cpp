@@ -11,8 +11,11 @@
 #include "Log.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "CrossPointSettings.h"
 #include "ble/BleServer.h"
 #include "ble/Session.h"
+#include "cards/CardManager.h"
+#include "cards/Wake.h"
 #include "port/SdPorts.h"
 #include "proto/Cbor.h"
 #include "proto/Messages.h"
@@ -32,6 +35,8 @@ MbedSha256 hash;
 DeviceSys sys;
 Outbox outbox(fs, sys);
 BleServer* ble = nullptr;
+// ~3.4 KiB of fixed entry slots, so it goes to PSRAM with the sessions.
+CardManager* cards = nullptr;
 Session* sessions[kLinks] = {};
 bool started = false;
 
@@ -54,6 +59,37 @@ class Dispatcher : public BleServer::Handler {
   }
 };
 Dispatcher dispatcher;
+
+// The card manager outlives any BLE session: the sleep hooks and the headless
+// scheduled wake need it even when the link never came up. Created on first use
+// and re-synced with SETTINGS on every call, since settings.json is loaded after
+// begin() on some paths.
+CardManager* cardManager() {
+  if (!cards) {
+    cards = newInPsram<CardManager>(fs, sys);
+    if (!cards) return nullptr;
+    cards->begin();
+  }
+  CardManager::WakeConfig cfg;
+  cfg.mode = SETTINGS.companionScheduledWake <= static_cast<uint8_t>(CardManager::WakeMode::Always)
+                 ? static_cast<CardManager::WakeMode>(SETTINGS.companionScheduledWake)
+                 : CardManager::WakeMode::Auto;
+  cfg.dailyMin = SETTINGS.companionDailyWakeMin;
+  cfg.windowS = SETTINGS.companionWakeWindowS;
+  cards->setWakeConfig(cfg);
+  return cards;
+}
+
+bool anyLinkUp() {
+  for (auto* s : sessions) {
+    if (s && s->state() != Session::State::Idle) return true;
+  }
+  return false;
+}
+
+// A scheduled wake that nobody answers is pure battery burn, so the window is cut
+// short when no central has connected by this point.
+constexpr uint32_t kNoPeerGraceMs = 30000;
 
 // info characteristic: {1: proto, 2: fw, 3: device}
 size_t buildInfo(uint8_t* out, size_t cap) {
@@ -78,8 +114,12 @@ bool begin() {
     CLOG_ERR("BLE server alloc failed");
     return false;
   }
+  if (!cardManager()) {
+    CLOG_ERR("card manager alloc failed");
+    return false;
+  }
   for (uint8_t i = 0; i < kLinks; ++i) {
-    if (!sessions[i]) sessions[i] = newInPsram<Session>(ble->link(i), fs, hash, sys, outbox);
+    if (!sessions[i]) sessions[i] = newInPsram<Session>(ble->link(i), fs, hash, sys, outbox, *cards);
     if (!sessions[i]) {
       CLOG_ERR("session %u alloc failed", i);
       return false;
@@ -129,6 +169,68 @@ void prepareForSleep() {
   for (auto* s : sessions) s->onDisconnect();
   ble->end();
   started = false;
+}
+
+// ---------------------------------------------------------------- cards
+
+void applyCardsForSleep() {
+  auto* c = cardManager();
+  if (c) c->applyForSleep();
+}
+
+void armScheduledWake() {
+  auto* c = cardManager();
+  if (!c) return;
+  // esp_sleep_enable_timer_wakeup() is additive: the power button wake armed by
+  // HalPowerManager::startDeepSleep() still works exactly as before, and
+  // esp_sleep_get_wakeup_cause() says which of the two fired.
+  wake::armTimer(c->armNextWake(sys.unixTime()));
+}
+
+bool runScheduledWakeIfDue() {
+  if (!wake::isTimerWake()) return false;
+  auto* c = cardManager();
+  if (!c) {
+    // No card manager (PSRAM exhausted): nothing can be scheduled, and the timer
+    // is disarmed on the next ordinary sleep. Boot normally rather than guessing.
+    CLOG_ERR("wake: timer wake with no card manager; booting normally");
+    return false;
+  }
+  if (!c->wakeEnabled()) {
+    // The schedule was cleared or the feature turned off between arming the timer
+    // and it firing. Waking the user's device to the home screen at 06:00 is the
+    // wrong answer, so disarm and go straight back down; the power button still
+    // wakes it as usual.
+    CLOG_INF("wake: timer wake with scheduled wake off; sleeping again");
+    wake::armTimer(0);
+    wake::sleepAgain();
+  }
+  const uint32_t windowMs = static_cast<uint32_t>(c->wakeConfig().windowS) * 1000u;
+  CLOG_INF("wake: scheduled card wake, advertising for %lu s", static_cast<unsigned long>(windowMs / 1000));
+
+  if (begin()) {
+    const uint32_t start = millis();
+    const uint32_t graceMs = windowMs < kNoPeerGraceMs ? windowMs : kNoPeerGraceMs;
+    // A push that is still running when the window closes gets the same again to
+    // finish; without the cap a wedged transfer could hold the device awake.
+    const uint32_t hardCapMs = windowMs * 2;
+    bool sawPeer = false;
+    for (;;) {
+      loop();
+      const uint32_t elapsed = millis() - start;
+      if (anyLinkUp()) sawPeer = true;
+      if (!sawPeer && elapsed >= graceMs) break;
+      if (elapsed >= windowMs && !wantsStayAwake()) break;
+      if (elapsed >= hardCapMs) break;
+      if (!wantsFastLoop()) delay(20);
+    }
+    prepareForSleep();
+  }
+  // Pin whatever the schedule now names, so a card pushed in the window is the
+  // one the panel paints at the next sleep, then re-arm and go back down.
+  c->applyForSleep();
+  wake::armTimer(c->armNextWake(sys.unixTime()));
+  wake::sleepAgain();  // does not return
 }
 
 void emitChord() {

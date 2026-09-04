@@ -328,6 +328,19 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Quick Resume: keep current content visible with moon icon instead of showing a static sleep screen.
   uint8_t quickResumeSleepScreen = QUICK_RESUME_NEVER;
 
+#if CROSSPOINT_COMPANION
+  // --- Companion fork: scheduled card wake (src/companion/README.md) ---------
+  // Persisted in settings.json only; deliberately not in SettingsList, so the
+  // on-device Settings screen and every i18n catalogue stay untouched.
+  enum COMPANION_WAKE { COMPANION_WAKE_AUTO = 0, COMPANION_WAKE_OFF = 1, COMPANION_WAKE_ALWAYS = 2 };
+  // AUTO = wake on the card schedule exactly while one is configured.
+  uint8_t companionScheduledWake = COMPANION_WAKE_AUTO;
+  // Extra daily wake, local minute-of-day. 1440 or more disables it.
+  uint16_t companionDailyWakeMin = 6 * 60;
+  // Seconds to advertise after a scheduled wake before going back to sleep.
+  uint16_t companionWakeWindowS = 120;
+#endif
+
   static constexpr uint8_t MIN_SLEEP_TIMEOUT_MINUTES = 1;
   static constexpr uint8_t SLEEP_TIMEOUT_NEVER_MINUTES = 31;
   static constexpr uint8_t MAX_SLEEP_TIMEOUT_MINUTES = SLEEP_TIMEOUT_NEVER_MINUTES;
