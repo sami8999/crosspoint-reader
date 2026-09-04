@@ -250,12 +250,33 @@ TEST(Session, UnknownTypeAndBadPayload) {
   EXPECT_EQ(n.code, NackCode::BadPayload);
   EXPECT_EQ(n.seq, 9u);
   f.link.drain();
-  // Types known to v1 but outside this build's caps.
+  // Types known to v1 but outside this build's caps: Nack{7 unsupported}, not
+  // Nack{2 unknownType} - the phone must be able to tell "I never heard of this"
+  // from "not wired up yet" (PROTOCOL.md 3.2).
   OpenBook ob;
-  ob.path = "/Books/x.epub";
+  ob.path = "/Brain/x.epub";
   f.sendFrame(msg::kOpenBook, ob);
-  n = f.decode<Nack>(0, msg::kNackFromReader);
-  EXPECT_EQ(n.code, NackCode::UnknownType);
+  EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::Unsupported);
+  f.link.drain();
+  SetCards sc;
+  sc.mode = CardsMode::Pin;
+  sc.entryCount = 0;
+  f.sendFrame(msg::kSetCards, sc);
+  EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::Unsupported);
+  f.link.drain();
+  ShowReply sr;
+  sr.text = "hi";
+  f.sendFrame(msg::kShowReply, sr);
+  EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::Unsupported);
+  f.link.drain();
+  EnterWifiUpload wu;
+  wu.mode = WifiMode::Sta;
+  f.sendFrame(msg::kEnterWifiUpload, wu);
+  EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::Unsupported);
+  // An id that is genuinely unknown still gets Nack{2}.
+  f.link.drain();
+  f.sendRaw(0x7D, {0xA0});
+  EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::UnknownType);
 }
 
 TEST(Session, QueryStatusAndFiles) {
@@ -515,6 +536,75 @@ TEST(Session, OutboxFlushListsTheDirectoryOnlyAFewTimes) {
   EXPECT_LE(f.fs.listDirCalls - before, static_cast<size_t>(kEvents) / Outbox::kSeqCacheMax + 2);
   EXPECT_EQ(f.decode<Event>(2, msg::kEvent).seq, 1u);
   EXPECT_EQ(f.decode<Event>(kEvents + 1, msg::kEvent).seq, static_cast<uint32_t>(kEvents));
+}
+
+// A second phone on the other link slot, sharing the same fixture's outbox.
+struct Peer {
+  FakeLink link;
+  Session session;
+  uint16_t phoneSeq = 0;
+  uint8_t buf[kMaxFrameSize];
+
+  explicit Peer(Fixture& f) : session(link, f.fs, f.hash, f.sys, f.outbox) { EXPECT_TRUE(session.begin()); }
+
+  template <class M>
+  void sendFrame(uint8_t type, const M& m, uint32_t nowMs = 1000) {
+    size_t len = 0;
+    ASSERT_TRUE(encodeFrame(type, phoneSeq++, m, buf, sizeof(buf), len));
+    session.onCtrlFrame(buf, len, nowMs);
+  }
+  void connectAndHello() {
+    session.onConnect(1000);
+    Hello h;
+    h.proto = kProtoVersion;
+    h.app = "ios-second";
+    h.clock = 1700000000;
+    sendFrame(msg::kHello, h);
+  }
+  template <class M>
+  M decode(size_t i, uint8_t expectType) {
+    FrameView v;
+    EXPECT_LT(i, link.frames.size());
+    EXPECT_TRUE(parseFrame(link.frames[i].data(), link.frames[i].size(), v));
+    EXPECT_EQ(v.header.type, expectType);
+    M m;
+    EXPECT_TRUE(decodePayload(v.payload, v.header.len, m));
+    return m;
+  }
+};
+
+// Both link slots share one Outbox with independent cursors, so one phone's
+// AckEvents could delete events the other was mid-flush on.
+TEST(Session, AckEventsIsRefusedWhileTheOtherLinkIsFlushing) {
+  Fixture a;
+  for (int i = 0; i < 5; ++i) a.outbox.append(EventKind::Chord, encodeChord);
+  a.link.capacity = 3;  // HelloAck + Status + one event, then stuck mid-flush
+  a.connectAndHello();
+  a.session.tick(1001);
+  ASSERT_EQ(a.link.frames.size(), 3u);
+  EXPECT_EQ(a.decode<Event>(2, msg::kEvent).seq, 1u);
+
+  Peer b(a);
+  b.connectAndHello();
+  b.link.drain();
+  AckEvents ack;
+  ack.upToSeq = 5;
+  b.sendFrame(msg::kAckEvents, ack);
+  Nack n = b.decode<Nack>(0, msg::kNackFromReader);
+  EXPECT_EQ(n.code, NackCode::Busy);
+  EXPECT_EQ(a.outbox.pending(), 5u);  // nothing deleted under A's feet
+
+  // A finishes its flush; the ack is then accepted and A can still be told what
+  // it has already sent.
+  a.link.capacity = 32;
+  a.session.tick(1002);
+  EXPECT_EQ(a.outbox.pending(), 5u);
+  b.link.drain();
+  b.sendFrame(msg::kAckEvents, ack);
+  b.decode<Ack>(0, msg::kAckFromReader);
+  EXPECT_EQ(a.outbox.pending(), 0u);
+  b.session.onDisconnect();
+  a.session.onDisconnect();
 }
 
 TEST(Session, PushFileRoundTrip) {

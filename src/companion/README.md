@@ -10,6 +10,18 @@ Upstream files are touched only at logged hook points (`docs/UPSTREAM_TOUCHPOINT
 - `Companion.*` — the only API `main.cpp` uses: `begin()`, `loop()`, `wantsFastLoop()`, `wantsStayAwake()`, `prepareForSleep()`, `emitChord()`.
 - Every file is wrapped in `#if CROSSPOINT_COMPANION … #endif`, so the stock envs compile none of it. Build the fork with `pio run -e x4pro-companion`, which defines `CROSSPOINT_COMPANION=1` and uses `partitions-companion.csv` (7.75 MiB OTA slots).
 
+Two link slots share one outbox (`BleServer::kMaxLinks` = 2) but hold independent
+flush cursors, so an `AckEvents` from one phone could delete events the other is
+still flushing. The rule: **a session refuses `AckEvents` with `Nack{4 busy}` while
+any flush other than its own is in progress** (`Outbox::flushers()`), and the phone
+retries — the window is one flush long. PROTOCOL.md v1 assumes a single phone;
+anything better than this (per-phone cursors persisted on SD) waits for a protocol
+that names the peer.
+
+`SetCards`, `OpenBook`, `ShowReply` and `EnterWifiUpload` are decoded and answered
+with `Nack{7 unsupported}` until their lanes land — the phone can tell "not wired up
+yet" from `Nack{2 unknownType}`.
+
 Threading model: NimBLE host task → FreeRTOS queue (PSRAM) → main loop. Session/Transfer/Outbox never run off the main loop, so they share `HalStorage`, `APP_STATE` and `activityManager` with the rest of the firmware without extra locking. While USB Drive owns the SD card (`requiresExclusiveStorageLoop()`), `companion::loop()` is not ticked; inbound frames queue up (32 deep) and are dropped beyond that.
 
 Host tests (gtest, no device needed):

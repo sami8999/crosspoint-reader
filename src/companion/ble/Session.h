@@ -97,6 +97,8 @@ class Session {
   void handleDeleteFile(const proto::FrameView& f);
   void handleAckEvents(const proto::FrameView& f);
   void pumpOutbox();
+  // Keeps flushing_ and the outbox's flusher count in step.
+  void setFlushing(bool on);
   bool bookChanged(uint32_t& permille);
   size_t maxFrame() const { return maxFrameForMtu(link_.mtu()); }
 

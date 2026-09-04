@@ -14,6 +14,7 @@ Session::Session(LinkPort& link, FsPort& fs, HashPort& hash, SysPort& sys, Outbo
     : link_(link), fs_(fs), sys_(sys), outbox_(outbox), transfer_(fs, hash, sys) {}
 
 Session::~Session() {
+  setFlushing(false);
   if (tx_) sys_.freeBig(tx_);
   if (names_) sys_.freeBig(names_);
   if (evt_) sys_.freeBig(evt_);
@@ -34,12 +35,22 @@ bool Session::begin() {
 
 // ---------------------------------------------------------------- lifecycle
 
+void Session::setFlushing(bool on) {
+  if (flushing_ == on) return;
+  flushing_ = on;
+  if (on) {
+    outbox_.addFlusher();
+  } else {
+    outbox_.removeFlusher();
+  }
+}
+
 void Session::onConnect(uint32_t nowMs) {
   state_ = State::AwaitHello;
   txSeq_ = 0;
   lastStatusMs_ = nowMs;
   lastPollMs_ = nowMs;
-  flushing_ = false;
+  setFlushing(false);
   flushCursor_ = 0;
   pending_.kind = Pending::Kind::None;
   lastBook_[0] = '\0';
@@ -49,12 +60,12 @@ void Session::onConnect(uint32_t nowMs) {
 void Session::onDisconnect() {
   transfer_.abort();
   state_ = State::Idle;
-  flushing_ = false;
+  setFlushing(false);
   pending_.kind = Pending::Kind::None;
 }
 
 void Session::onOutboxAppended() {
-  if (state_ == State::Active) flushing_ = true;
+  if (state_ == State::Active) setFlushing(true);
 }
 
 // ---------------------------------------------------------------- sending
@@ -188,8 +199,8 @@ void Session::onCtrlFrame(const uint8_t* frame, size_t len, uint32_t nowMs) {
     case msg::kOpenBook:
     case msg::kShowReply:
     case msg::kEnterWifiUpload:
-      // Known in v1 but not offered in kCaps by this build.
-      sendNack(seq, NackCode::UnknownType, "unsupported");
+      // Known in v1 but not offered in kCaps by this build (PROTOCOL.md 3.2).
+      sendNack(seq, NackCode::Unsupported, "unsupported");
       break;
     default: sendNack(seq, NackCode::UnknownType); break;
   }
@@ -232,7 +243,7 @@ void Session::handleHello(const FrameView& f) {
   state_ = State::Active;
   CLOG_INF("session: hello from %.*s", static_cast<int>(h.app.size()), h.app.data());
   sendStatus(lastStatusMs_);
-  flushing_ = true;
+  setFlushing(true);
   flushCursor_ = 0;
 }
 
@@ -258,7 +269,7 @@ void Session::handleQuery(const FrameView& f) {
       break;
     }
     case QueryWhat::Outbox:  // re-flush everything still pending; no direct reply
-      flushing_ = true;
+      setFlushing(true);
       flushCursor_ = 0;
       break;
     default: sendNack(f.header.seq, NackCode::BadPayload, "what"); break;
@@ -386,6 +397,15 @@ void Session::handleAckEvents(const FrameView& f) {
     sendNack(f.header.seq, NackCode::BadPayload);
     return;
   }
+  // One outbox, two link slots, independent cursors: deleting here would drop
+  // events the other phone is in the middle of flushing (PROTOCOL.md 2 knows only
+  // one phone). Refused as busy while any flush but this session's own is running;
+  // the phone retries, and the window is one flush long.
+  if (outbox_.flushers() > (flushing_ ? 1u : 0u)) {
+    CLOG_INF("session: AckEvents deferred, another link is flushing");
+    sendNack(f.header.seq, NackCode::Busy, "flushing");
+    return;
+  }
   if (!outbox_.ack(a.upToSeq)) {
     sendNack(f.header.seq, NackCode::IoError);
     return;
@@ -400,7 +420,7 @@ void Session::pumpOutbox() {
   while (flushing_ && link_.canSend()) {
     uint32_t seq;
     if (!outbox_.nextAfter(flushCursor_, seq)) {
-      flushing_ = false;
+      setFlushing(false);
       return;
     }
     size_t len = 0;

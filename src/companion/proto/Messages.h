@@ -66,6 +66,8 @@ enum class NackCode : uint8_t {
   Busy = 4,
   NotFound = 5,
   IoError = 6,
+  // Known type, but this build's caps do not offer the feature yet.
+  Unsupported = 7,
 };
 
 enum class CardsMode : uint8_t { Pin = 0, Rotate = 1, Schedule = 2 };

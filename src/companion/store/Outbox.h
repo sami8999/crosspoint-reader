@@ -57,6 +57,16 @@ class Outbox {
   // Deletes every pending event with seq <= upToSeq.
   bool ack(uint32_t upToSeq);
 
+  // The two link slots share one outbox but hold independent cursors, so one
+  // phone's AckEvents can delete events the other is still flushing. Sessions
+  // register while they walk the log and refuse an ack whenever a flush other
+  // than the caller's own is running (see Session::handleAckEvents).
+  void addFlusher() { ++flushers_; }
+  void removeFlusher() {
+    if (flushers_) --flushers_;
+  }
+  uint8_t flushers() const { return flushers_; }
+
  private:
   template <class Ctx>
   uint32_t appendWith(proto::EventKind kind, const Ctx& ctx) {
@@ -88,6 +98,7 @@ class Outbox {
   uint32_t* seqCache_ = nullptr;  // tail of scratch_: ascending pending seqs > cacheAfter_
   uint32_t lastSeq_ = 0;
   uint32_t pending_ = 0;
+  uint8_t flushers_ = 0;
   uint32_t cacheAfter_ = 0;
   uint16_t cacheCount_ = 0;
   bool cacheValid_ = false;

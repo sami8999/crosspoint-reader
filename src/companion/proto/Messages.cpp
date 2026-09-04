@@ -555,8 +555,10 @@ bool PushAck::decode(CborReader& r) {
         ok = r.enterArray(n) && n <= kMaxMissingChunks;
         for (size_t i = 0; ok && i < n; ++i) {
           uint32_t v;
+          // The store stays inside the success branch: reading an uninitialised
+          // `v` after a failed readUint32 is undefined behaviour.
           ok = r.readUint32(v) && v <= 0xFFFF;
-          missing[i] = static_cast<uint16_t>(v);
+          if (ok) missing[i] = static_cast<uint16_t>(v);
         }
         if (ok) missingCount = n;
         break;
