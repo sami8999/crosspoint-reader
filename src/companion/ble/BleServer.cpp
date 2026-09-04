@@ -90,11 +90,18 @@ bool BleServer::begin(SysPort& sys, const uint8_t* info, size_t infoLen) {
   // PSRAM: rx queue storage (32 × ~520 B) and, per link, a 4 KiB reassembly buffer
   // plus a 6-frame × 4 KiB notify ring. Allocated once for the firmware lifetime.
   if (!rxStorage_) rxStorage_ = static_cast<uint8_t*>(sys.allocBig(kRxDepth * sizeof(RxItem)));
-  if (!rxStorage_) {
+  if (!hostStage_) hostStage_ = static_cast<RxItem*>(sys.allocBig(sizeof(RxItem)));
+  if (!rxStorage_ || !hostStage_) {
     CLOG_ERR("ble: OOM rx queue");
     return false;
   }
   if (!rx_) rx_ = xQueueCreateStatic(kRxDepth, sizeof(RxItem), rxStorage_, &rxStatic_);
+  if (!rx_) {
+    // Without the queue the host task can accept writes it can never deliver:
+    // a link that looks up and is deaf.
+    CLOG_ERR("ble: rx queue create failed");
+    return false;
+  }
   for (auto& c : conns_) {
     if (!c.reasmBuf) c.reasmBuf = static_cast<uint8_t*>(sys.allocBig(proto::kMaxFrameSize));
     if (!c.txBuf) c.txBuf = static_cast<uint8_t*>(sys.allocBig(kTxSlots * proto::kMaxFrameSize));
@@ -242,10 +249,20 @@ int BleServer::slotForHandle(uint16_t handle) const {
   return -1;
 }
 
-void BleServer::post(const RxItem& item) {
-  if (rx_ && xQueueSend(rx_, &item, 0) != pdTRUE) {
+bool BleServer::post(const RxItem& item) {
+  if (!rx_ || xQueueSend(rx_, &item, 0) != pdTRUE) {
     CLOG_ERR("ble: rx queue full, dropped kind %u", item.kind);
+    return false;
   }
+  return true;
+}
+
+bool BleServer::postEvent(uint8_t slot, uint8_t kind) {
+  if (!hostStage_) return false;
+  hostStage_->slot = slot;
+  hostStage_->kind = kind;
+  hostStage_->len = 0;
+  return post(*hostStage_);
 }
 
 // ---------------------------------------------------------------- host-task callbacks
@@ -268,8 +285,7 @@ int BleServer::gapEvent(ble_gap_event* event, void*) {
       c.mtu = 23;
       c.subscribed = false;
       c.handle = event->connect.conn_handle;
-      RxItem item{static_cast<uint8_t>(slot), kRxConnect, 0, {}};
-      self->post(item);
+      self->postEvent(static_cast<uint8_t>(slot), kRxConnect);
       ble_gattc_exchange_mtu(event->connect.conn_handle, nullptr, nullptr);
       CLOG_INF("ble: connected (slot %d)", slot);
       self->startAdvertising();
@@ -281,8 +297,7 @@ int BleServer::gapEvent(ble_gap_event* event, void*) {
         Conn& c = self->conns_[slot];
         c.subscribed = false;
         c.handle = BLE_HS_CONN_HANDLE_NONE;
-        RxItem item{static_cast<uint8_t>(slot), kRxDisconnect, 0, {}};
-        self->post(item);
+        self->postEvent(static_cast<uint8_t>(slot), kRxDisconnect);
         CLOG_INF("ble: disconnected (slot %d, reason %d)", slot, event->disconnect.reason);
       }
       self->startAdvertising();
@@ -324,14 +339,17 @@ int BleServer::gattAccess(uint16_t connHandle, uint16_t, ble_gatt_access_ctxt* c
   if (slot < 0) return BLE_ATT_ERR_UNLIKELY;
   const uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
   if (len > kRxData) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-  RxItem item;
-  item.slot = static_cast<uint8_t>(slot);
-  item.kind = which == kChrCtrl ? kRxCtrl : kRxBulk;
+  RxItem* item = self->hostStage_;  // never on this task's stack: ~518 B
+  if (!item) return BLE_ATT_ERR_UNLIKELY;
+  item->slot = static_cast<uint8_t>(slot);
+  item->kind = which == kChrCtrl ? kRxCtrl : kRxBulk;
   uint16_t got = 0;
-  if (ble_hs_mbuf_to_flat(ctxt->om, item.data, kRxData, &got) != 0) return BLE_ATT_ERR_UNLIKELY;
-  item.len = got;
-  self->post(item);
-  return 0;
+  if (ble_hs_mbuf_to_flat(ctxt->om, item->data, kRxData, &got) != 0) return BLE_ATT_ERR_UNLIKELY;
+  item->len = got;
+  // A dropped write must not be acknowledged: the phone would carry on and the
+  // next segment would break reassembly with no Nack to explain it. INSUFFICIENT_RES
+  // tells the central to retry.
+  return self->post(*item) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
 // ---------------------------------------------------------------- main-loop side
@@ -391,7 +409,18 @@ void BleServer::terminate(uint8_t slot) {
 void BleServer::pumpSlot(uint8_t slot) {
   Conn& c = conns_[slot];
   const uint16_t handle = c.handle;
-  if (handle == BLE_HS_CONN_HANDLE_NONE || !c.subscribed) return;
+  if (handle == BLE_HS_CONN_HANDLE_NONE) return;
+  if (!c.subscribed) {
+    // A peer that never enabled notifications has nothing to drain, but it can
+    // still be waiting to be dropped (a proto-mismatch Nack, which it will never
+    // receive, asks for exactly that). Checked before the subscribed guard or the
+    // link slot is held until the peer disconnects on its own.
+    if (c.disconnectAfterDrain) {
+      c.disconnectAfterDrain = false;
+      terminate(slot);
+    }
+    return;
+  }
   for (size_t sent = 0; sent < kMaxSegmentsPerPump; ++sent) {
     if (!c.segPending) {
       if (!c.seg) {

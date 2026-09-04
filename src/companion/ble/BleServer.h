@@ -100,7 +100,11 @@ class BleServer {
   void pumpSlot(uint8_t slot);
   void startAdvertising();
   int slotForHandle(uint16_t handle) const;
-  void post(const RxItem& item);
+  // Copies `item` into the rx queue. False when the queue is full (the write is
+  // then dropped, and an acknowledged ctrl write must not be).
+  bool post(const RxItem& item);
+  // Stages a payload-less event through hostStage_ and posts it.
+  bool postEvent(uint8_t slot, uint8_t kind);
   void terminate(uint8_t slot);
 
   static void onSync();
@@ -124,6 +128,10 @@ class BleServer {
   QueueHandle_t rx_ = nullptr;
   StaticQueue_t rxStatic_ = {};
   uint8_t* rxStorage_ = nullptr;  // kRxDepth × sizeof(RxItem), PSRAM
+  // Staging slot for the NimBLE host task: an RxItem is ~518 B and the host task
+  // stack cannot carry one (Resource Protocol rule 1 caps locals at 256 B).
+  // gapEvent() and gattAccess() are its only users and both run on that task.
+  RxItem* hostStage_ = nullptr;  // sizeof(RxItem), PSRAM
   Conn conns_[kMaxLinks] = {};
 };
 

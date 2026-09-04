@@ -74,16 +74,20 @@ bool begin() {
     return false;
   }
   if (!ble) ble = newInPsram<BleServer>();
-  for (uint8_t i = 0; i < kLinks; ++i) {
-    if (!sessions[i] && ble) sessions[i] = newInPsram<Session>(ble->link(i), fs, hash, sys, outbox);
-    if (!sessions[i] || !sessions[i]->begin()) {
-      CLOG_ERR("session %u init failed", i);
-      return false;
-    }
-  }
   if (!ble) {
     CLOG_ERR("BLE server alloc failed");
     return false;
+  }
+  for (uint8_t i = 0; i < kLinks; ++i) {
+    if (!sessions[i]) sessions[i] = newInPsram<Session>(ble->link(i), fs, hash, sys, outbox);
+    if (!sessions[i]) {
+      CLOG_ERR("session %u alloc failed", i);
+      return false;
+    }
+    if (!sessions[i]->begin()) {
+      CLOG_ERR("session %u buffers failed", i);
+      return false;
+    }
   }
   uint8_t info[96];
   const size_t infoLen = buildInfo(info, sizeof(info));
