@@ -1,8 +1,7 @@
-add_executable(CompanionBleTest
-  ChunkBitmapTest.cpp
-  OutboxTest.cpp
-  TransferTest.cpp
-  SessionTest.cpp
+add_executable(CompanionCardsTest
+  CardManagerTest.cpp
+  ScheduleTest.cpp
+  SessionCardsTest.cpp
   ${REPO_ROOT}/src/companion/proto/Cbor.cpp
   ${REPO_ROOT}/src/companion/proto/Frame.cpp
   ${REPO_ROOT}/src/companion/proto/Messages.cpp
@@ -13,16 +12,18 @@ add_executable(CompanionBleTest
   ${REPO_ROOT}/src/companion/store/Outbox.cpp
 )
 
-target_include_directories(CompanionBleTest PRIVATE
+target_include_directories(CompanionCardsTest PRIVATE
   ${REPO_ROOT}/src
+  # FakePorts.h is shared with the BLE suite rather than duplicated.
+  ${REPO_ROOT}/test/companion_ble
 )
 
 # The companion sources are compiled out of every stock env; the tests opt in.
-target_compile_definitions(CompanionBleTest PRIVATE CROSSPOINT_COMPANION=1)
+target_compile_definitions(CompanionCardsTest PRIVATE CROSSPOINT_COMPANION=1)
 
-target_link_libraries(CompanionBleTest PRIVATE
+target_link_libraries(CompanionCardsTest PRIVATE
   crosspoint_test_common
   GTest::gtest_main
 )
 
-gtest_discover_tests(CompanionBleTest)
+gtest_discover_tests(CompanionCardsTest)

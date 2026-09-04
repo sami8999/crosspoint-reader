@@ -271,6 +271,13 @@ void enterDeepSleep(bool fromTimeout = false) {
 
   APP_STATE.saveToFile();
 
+#if CROSSPOINT_COMPANION
+  // Must run before goToSleep() renders the sleep screen: in schedule mode this
+  // is what copies the card for the current window to /sleep.bmp, which
+  // SleepActivity::renderCustomSleepScreen() prefers over /.sleep.
+  companion::applyCardsForSleep();
+#endif
+
   // Commit to sleeping before goToSleep() runs the outgoing activity's onExit():
   // a WiFi activity would otherwise silentRestart() here and reboot instead.
   deepSleepInProgress = true;
@@ -292,6 +299,7 @@ void enterDeepSleep(bool fromTimeout = false) {
 
 #if CROSSPOINT_COMPANION
   companion::prepareForSleep();  // stop BLE host + controller; wake re-inits via setup()
+  companion::armScheduledWake();  // adds a timer wake source next to the power button
 #endif
   halTiltSensor.deepSleep();
   display.deepSleep();
@@ -429,6 +437,15 @@ void setup() {
     SETTINGS.readerMenuStyle = CrossPointSettings::READER_MENU_TOOLBAR;
   }
   SETTINGS.loadFromFile();
+
+#if CROSSPOINT_COMPANION
+  // A scheduled card wake never reaches the UI: it brings BLE up headless, gives
+  // the phone a bounded window to push a card and deep-sleeps again. Placed here
+  // because it needs the SD card and SETTINGS but nothing after them - no
+  // display, no fonts, no activity manager. Returns false on every other wake.
+  if (companion::runScheduledWakeIfDue()) return;
+#endif
+
   RECENT_BOOKS.loadFromFile();
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
   KOREADER_STORE.loadFromFile();

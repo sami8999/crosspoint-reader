@@ -10,8 +10,8 @@ namespace companion {
 
 using namespace proto;
 
-Session::Session(LinkPort& link, FsPort& fs, HashPort& hash, SysPort& sys, Outbox& outbox)
-    : link_(link), fs_(fs), sys_(sys), outbox_(outbox), transfer_(fs, hash, sys) {}
+Session::Session(LinkPort& link, FsPort& fs, HashPort& hash, SysPort& sys, Outbox& outbox, CardManager& cards)
+    : link_(link), fs_(fs), sys_(sys), outbox_(outbox), cards_(cards), transfer_(fs, hash, sys) {}
 
 Session::~Session() {
   setFlushing(false);
@@ -195,7 +195,7 @@ void Session::onCtrlFrame(const uint8_t* frame, size_t len, uint32_t nowMs) {
       }
       break;
     }
-    case msg::kSetCards:
+    case msg::kSetCards: handleSetCards(f); break;
     case msg::kOpenBook:
     case msg::kShowReply:
     case msg::kEnterWifiUpload:
@@ -234,6 +234,9 @@ void Session::handleHello(const FrameView& f) {
   ack.caps = kCaps;
   ack.clockDelta = readerNow ? static_cast<int32_t>(static_cast<int64_t>(readerNow) - h.clock) : 0;
   ack.device = std::string_view(sys_.deviceName());
+  // The card schedule is expressed in local minutes-of-day, so the reader has to
+  // know the phone's offset to place them against its UTC RTC.
+  cards_.setTimezone(h.tzOffsetMin);
   if (h.clock) {
     if (sys_.setUnixTime(h.clock)) {
       CLOG_INF("session: clock set from phone (delta %ld s)", static_cast<long>(ack.clockDelta));
@@ -361,6 +364,10 @@ void Session::handlePushEnd(const FrameView& f) {
     return;
   }
   transfer_.end(e.transferId, pushAck_);
+  // A card that just landed in /.sleep becomes the schedule's fallback pick.
+  // Transfer::path() survives end() (the buffer is a member, not the released
+  // assembly block), and only a status of Ok means it names this transfer.
+  if (pushAck_.status == PushStatus::Ok) cards_.onCardPushed(transfer_.path());
   sendPushAck();
 }
 
@@ -389,6 +396,23 @@ void Session::handleDeleteFile(const FrameView& f) {
     return;
   }
   sendAck(f.header.seq);
+}
+
+// PROTOCOL.md 2.1: Ack on success, Nack on failure. CardManager's failures map
+// onto the same codes Transfer uses, so "outside the phone's roots" stays
+// indistinguishable from "not there" on the link (it leaks nothing about the card).
+void Session::handleSetCards(const FrameView& f) {
+  if (!decodePayload(f.payload, f.header.len, setCards_)) {
+    sendNack(f.header.seq, NackCode::BadPayload);
+    return;
+  }
+  switch (cards_.apply(setCards_)) {
+    case CardManager::Result::Ok: sendAck(f.header.seq); break;
+    case CardManager::Result::BadRequest: sendNack(f.header.seq, NackCode::BadPayload, "cards"); break;
+    case CardManager::Result::Denied: sendNack(f.header.seq, NackCode::NotFound, "path"); break;
+    case CardManager::Result::NotFound: sendNack(f.header.seq, NackCode::NotFound); break;
+    case CardManager::Result::IoError: sendNack(f.header.seq, NackCode::IoError); break;
+  }
 }
 
 void Session::handleAckEvents(const FrameView& f) {

@@ -29,6 +29,22 @@ bool wantsStayAwake();
 // reset, so wake goes through setup() → begin() and advertising resumes there.
 void prepareForSleep();
 
+// Cards. Called from enterDeepSleep() *before* the sleep screen is rendered: in
+// schedule mode this is what copies the card for the current window to
+// /sleep.bmp, which SleepActivity prefers over everything in /.sleep.
+void applyCardsForSleep();
+
+// Arms the deep-sleep timer for the next scheduled card wake, alongside the
+// power-button wake source enterDeepSleep() already sets up. No-op when the
+// feature is off or no schedule is configured.
+void armScheduledWake();
+
+// True when this boot is a scheduled card wake. It never returns in that case:
+// it brings up BLE with no display or activity manager, advertises for a bounded
+// window so the phone can push a card, then deep-sleeps again. Every other wake
+// cause returns false immediately and setup() continues normally.
+bool runScheduledWakeIfDue();
+
 // Emits a Chord event from the current screen context into the outbox and kicks
 // the flush on every live session. Chord *detection* is Lane F3; this is the hook.
 void emitChord();
