@@ -98,6 +98,10 @@ class HalFile : public Print {
   size_t fileSize();
   uint64_t fileSize64();
   bool seek(size_t pos);
+  // Grow an empty, writable file to `length` bytes by allocating contiguous
+  // clusters (SdFat FsFile::preAllocate). The data is uninitialised; the file
+  // must have no clusters yet. False when the volume cannot satisfy it.
+  bool preAllocate(uint64_t length);
   bool seek64(uint64_t pos);
   bool seekCur(int64_t offset);
   bool seekSet(size_t offset);

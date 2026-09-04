@@ -54,6 +54,8 @@ class Transfer {
   static bool validPath(const char* path, size_t len);
 
  private:
+  // Grows `.part` to size_ so out-of-order chunk writes can seek anywhere inside it.
+  bool preSizePart();
   proto::PushStatus finalize();
   bool hashMatches();
   void release();

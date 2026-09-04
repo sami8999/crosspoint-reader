@@ -7,6 +7,7 @@
 #include <HalGPIO.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
+#include <Memory.h>
 #include <esp_heap_caps.h>
 
 #include <string>
@@ -28,6 +29,7 @@ class HalFsFile : public FsFile {
     if (!file_.seek(offset)) return false;
     return file_.write(data, len) == len;
   }
+  bool preAllocate(uint32_t size) override { return size != 0 && file_.preAllocate(size); }
   bool readAt(uint32_t offset, uint8_t* out, size_t len, size_t& got) override {
     if (!file_.seek(offset)) return false;
     const int n = file_.read(out, len);
@@ -85,13 +87,13 @@ bool SdFs::listDir(const char* path, DirVisitor visit, void* user) {
 std::unique_ptr<FsFile> SdFs::openWrite(const char* path) {
   HalFile f = Storage.open(path, O_RDWR | O_CREAT | O_TRUNC);
   if (!f) return nullptr;
-  return std::make_unique<HalFsFile>(std::move(f));
+  return makeUniqueNoThrow<HalFsFile>(std::move(f));
 }
 
 std::unique_ptr<FsFile> SdFs::openRead(const char* path) {
   HalFile f = Storage.open(path, O_RDONLY);
   if (!f) return nullptr;
-  return std::make_unique<HalFsFile>(std::move(f));
+  return makeUniqueNoThrow<HalFsFile>(std::move(f));
 }
 
 // Same invalidation the web upload path performs (CrossPointWebServer → clearBookCache);

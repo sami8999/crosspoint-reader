@@ -22,6 +22,12 @@ class FakeFs : public FsPort {
   std::vector<std::string> replaced;
   bool failWrites = false;
   bool failRename = false;
+  // Mirrors a volume that cannot hand out contiguous clusters: preAllocate()
+  // fails and callers must fall back to zero-filling.
+  bool supportsPreAllocate = true;
+  // Fails writes through an already-open handle only (openWrite still succeeds).
+  bool failFileWrites = false;
+  size_t listDirCalls = 0;
 
   static std::string parent(const std::string& p) {
     const auto pos = p.find_last_of('/');
@@ -63,6 +69,7 @@ class FakeFs : public FsPort {
     return true;
   }
   bool listDir(const char* path, DirVisitor visit, void* user) override {
+    ++listDirCalls;
     if (!dirs.count(path)) return false;
     for (auto& [name, data] : files) {
       if (parent(name) != path) continue;
@@ -81,11 +88,24 @@ class FakeFs : public FsPort {
 
   class File : public FsFile {
    public:
-    File(std::vector<uint8_t>& v, bool writable, bool* fail) : v_(v), writable_(writable), fail_(fail) {}
+    File(std::vector<uint8_t>& v, bool writable, bool* fail, bool preAlloc = false, const bool* failFile = nullptr)
+        : v_(v), writable_(writable), fail_(fail), preAlloc_(preAlloc), failFile_(failFile) {}
+    bool broken() const { return (fail_ && *fail_) || (failFile_ && *failFile_); }
+    // Faithful to SdFat: writeAt() seeks first, and FatFile::seekSet() fails for
+    // any position past the current end of file. A write may extend the file from
+    // its end, never start beyond it. Pre-sizing the file is the only way to make
+    // out-of-order writes land.
     bool writeAt(uint32_t off, const uint8_t* data, size_t len) override {
-      if (!writable_ || (fail_ && *fail_)) return false;
+      if (!writable_ || broken()) return false;
+      if (off > v_.size()) return false;
       if (v_.size() < off + len) v_.resize(off + len);
       memcpy(v_.data() + off, data, len);
+      return true;
+    }
+    // SdFat only pre-allocates a file that has no clusters yet.
+    bool preAllocate(uint32_t size) override {
+      if (!writable_ || !preAlloc_ || broken() || !v_.empty() || size == 0) return false;
+      v_.assign(size, 0);
       return true;
     }
     bool readAt(uint32_t off, uint8_t* out, size_t len, size_t& got) override {
@@ -103,13 +123,15 @@ class FakeFs : public FsPort {
     std::vector<uint8_t>& v_;
     bool writable_;
     bool* fail_;
+    bool preAlloc_;
+    const bool* failFile_;
   };
 
   std::unique_ptr<FsFile> openWrite(const char* path) override {
     if (failWrites) return nullptr;
     auto& v = files[path];
     v.clear();
-    return std::make_unique<File>(v, true, &failWrites);
+    return std::make_unique<File>(v, true, &failWrites, supportsPreAllocate, &failFileWrites);
   }
   std::unique_ptr<FsFile> openRead(const char* path) override {
     auto it = files.find(path);

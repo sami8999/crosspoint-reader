@@ -110,12 +110,34 @@ Transfer::BeginResult Transfer::begin(const proto::PushFile& req, uint32_t nowMs
       fs_.remove(partPath_);
       return BeginResult::IoError;
     }
+    // Chunks are unordered (PROTOCOL.md 1.4), so `.part` must already be size_
+    // bytes long before the first seek-write: SdFat's FatFile::seekSet fails for
+    // pos > fileSize, which would drop every gapped chunk.
+    if (!preSizePart()) {
+      CLOG_ERR("xfer: cannot pre-size %s to %lu bytes", partPath_, static_cast<unsigned long>(size_));
+      release();
+      fs_.remove(partPath_);
+      return BeginResult::IoError;
+    }
   }
   active_ = true;
   CLOG_INF("xfer %lu: %s %lu bytes, %lu chunks x %lu, %s", static_cast<unsigned long>(id_), path_,
            static_cast<unsigned long>(size_), static_cast<unsigned long>(chunkCount_),
            static_cast<unsigned long>(chunkSize_), data_ ? "psram" : "sd");
   return BeginResult::Ok;
+}
+
+// One FAT operation when the backend supports it; otherwise a sequential
+// zero-fill through io_ (already allocated, so no extra memory).
+bool Transfer::preSizePart() {
+  if (part_->preAllocate(size_)) return true;
+  memset(io_, 0, kIoBuf);
+  for (uint32_t off = 0; off < size_;) {
+    const size_t n = size_ - off < kIoBuf ? size_ - off : kIoBuf;
+    if (!part_->writeAt(off, io_, n)) return false;
+    off += static_cast<uint32_t>(n);
+  }
+  return part_->flush();
 }
 
 void Transfer::onChunk(const proto::BulkChunk& chunk, uint32_t nowMs) {

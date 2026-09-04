@@ -279,6 +279,75 @@ TEST(Transfer, SdStreamingPathWhenPsramExhausted) {
   EXPECT_EQ(g.sys.live, 0u);
 }
 
+// The fake now refuses a write that starts past EOF, exactly as SdFat's
+// seekSet() does. Without the `.part` pre-sizing in begin(), every gapped chunk
+// on the SD path would be lost.
+TEST(Transfer, FakeFileRejectsWritesPastEof) {
+  FakeFs fs;
+  auto f = fs.openWrite("/x.bin");
+  ASSERT_TRUE(f);
+  const uint8_t byte = 1;
+  EXPECT_FALSE(f->writeAt(10, &byte, 1));  // starts past the end
+  EXPECT_TRUE(f->writeAt(0, &byte, 1));    // appends at the end
+  EXPECT_TRUE(f->writeAt(1, &byte, 1));
+  EXPECT_FALSE(f->writeAt(3, &byte, 1));
+  EXPECT_EQ(fs.files["/x.bin"].size(), 2u);
+}
+
+TEST(Transfer, SdStreamingPreSizesPartFile) {
+  Fixture g;
+  g.chunkSize = 4096;
+  g.makePayload(Transfer::kPsramBudget + 5000);
+  ASSERT_EQ(g.xfer.begin(g.request("/big/file.bin"), 0), Transfer::BeginResult::Ok);
+  EXPECT_TRUE(g.xfer.usesSd());
+  // `.part` is full-size before the first chunk lands, so a seek-write anywhere
+  // inside it succeeds.
+  EXPECT_EQ(g.fs.files["/big/file.bin.part"].size(), g.payload.size());
+}
+
+// A gapped, out-of-order chunk sequence is the normal case on the bulk
+// characteristic; before the pre-sizing fix every one of these writes failed.
+TEST(Transfer, SdStreamingAcceptsGappedOutOfOrderChunks) {
+  for (bool preAlloc : {true, false}) {
+    Fixture g;
+    g.fs.supportsPreAllocate = preAlloc;  // false exercises the zero-fill fallback
+    g.chunkSize = 4096;
+    g.makePayload(Transfer::kPsramBudget + 5000);
+    ASSERT_EQ(g.xfer.begin(g.request("/big/file.bin"), 0), Transfer::BeginResult::Ok);
+    ASSERT_TRUE(g.xfer.usesSd());
+    const size_t n = g.chunkCount();
+    ASSERT_GT(n, 8u);
+    // Round one: only the odd chunks, highest first.
+    for (size_t i = n; i-- > 0;) {
+      if (i % 2) g.sendChunk(i);
+    }
+    PushAck ack;
+    g.xfer.end(7, ack);
+    EXPECT_EQ(ack.status, PushStatus::Missing);
+    EXPECT_EQ(ack.missing[0], 0);
+    // Round two: the even chunks, also out of order.
+    for (size_t i = n; i-- > 0;) {
+      if (i % 2 == 0) g.sendChunk(i);
+    }
+    g.xfer.end(7, ack);
+    EXPECT_EQ(ack.status, PushStatus::Ok) << "preAllocate=" << preAlloc;
+    EXPECT_EQ(g.fs.files["/big/file.bin"], g.payload);
+    EXPECT_FALSE(g.fs.files.count("/big/file.bin.part"));
+    EXPECT_EQ(g.sys.live, 0u);
+  }
+}
+
+TEST(Transfer, SdStreamingFailsWhenPartCannotBePreSized) {
+  Fixture g;
+  g.fs.supportsPreAllocate = false;
+  g.chunkSize = 4096;
+  g.makePayload(Transfer::kPsramBudget + 5000);
+  g.fs.failFileWrites = true;  // the zero-fill fallback cannot write either
+  EXPECT_EQ(g.xfer.begin(g.request("/big/file.bin"), 0), Transfer::BeginResult::IoError);
+  EXPECT_FALSE(g.xfer.active());
+  EXPECT_EQ(g.sys.live, 0u);
+}
+
 TEST(Transfer, SdStreamingHashMismatch) {
   Fixture g;
   g.chunkSize = 4096;

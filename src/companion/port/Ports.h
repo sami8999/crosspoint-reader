@@ -16,6 +16,10 @@ class FsFile {
  public:
   virtual ~FsFile() = default;
   virtual bool writeAt(uint32_t offset, const uint8_t* data, size_t len) = 0;
+  // Grows the file to `size` bytes in one filesystem operation so later writeAt()
+  // calls can land at any offset below it. Returns false when the backend cannot
+  // do it (the caller then zero-fills sequentially). Contents are undefined.
+  virtual bool preAllocate(uint32_t /*size*/) { return false; }
   // Reads up to `len` bytes; `got` receives the count (0 at EOF). Returns false on I/O error.
   virtual bool readAt(uint32_t offset, uint8_t* out, size_t len, size_t& got) = 0;
   virtual bool flush() = 0;
