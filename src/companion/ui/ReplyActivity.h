@@ -21,6 +21,7 @@ class ReplyActivity final : public Activity, private UiAppHost {
   ReplyActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, ReplyStore& store);
 
   void onEnter() override;
+  void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
   // Back also leaves; the reader underneath is untouched.

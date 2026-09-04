@@ -36,11 +36,18 @@ class ReplyStore {
   uint32_t generation() const { return generation_; }
   bool empty() const { return !text_ || !text_[0]; }
 
+  // Set by ReplyActivity for its lifetime. A second ShowReply while one is on
+  // screen replaces the text in place (the activity watches generation()); it
+  // must not stack another copy of the same screen.
+  void setOnScreen(bool on) { onScreen_ = on; }
+  bool onScreen() const { return onScreen_; }
+
  private:
   char* text_ = nullptr;  // PSRAM, kMaxText + 1
   char title_[kMaxTitle + 1] = {};
   uint32_t forEventSeq_ = 0;
   uint32_t generation_ = 0;
+  bool onScreen_ = false;
 };
 
 }  // namespace companion::ui

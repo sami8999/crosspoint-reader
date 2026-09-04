@@ -18,11 +18,17 @@ ReplyActivity::ReplyActivity(GfxRenderer& renderer, MappedInputManager& mappedIn
 
 void ReplyActivity::onEnter() {
   Activity::onEnter();
+  store_.setOnScreen(true);
   resetUi();
   generation_ = store_.generation();
   topLine_ = 0;
   app.setScreen(&ReplyActivity::screenTrampoline, this);
   requestUpdate();
+}
+
+void ReplyActivity::onExit() {
+  Activity::onExit();
+  store_.setOnScreen(false);
 }
 
 void ReplyActivity::screenTrampoline(UiScreen& screen, void* user) {

@@ -70,9 +70,13 @@ class ReplyUi : public UiPort {
     CLOG_INF("reply: %u bytes for event %lu", static_cast<unsigned>(text.size()),
              static_cast<unsigned long>(forEventSeq));
     // A reply lands over whatever is on screen, reader page included; the
-    // activity underneath is untouched and comes straight back on Back.
+    // activity underneath is untouched and comes straight back on Back. A
+    // second reply while one is up replaces the text in place - ReplyActivity
+    // watches the store's generation - rather than stacking another screen.
     overlay.discard();
-    activityManager.pushActivity(std::make_unique<ui::ReplyActivity>(renderer, mappedInputManager, replies));
+    if (!replies.onScreen()) {
+      activityManager.pushActivity(std::make_unique<ui::ReplyActivity>(renderer, mappedInputManager, replies));
+    }
     return true;
   }
 };
