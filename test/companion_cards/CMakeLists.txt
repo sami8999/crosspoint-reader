@@ -1,12 +1,15 @@
 add_executable(CompanionCardsTest
   CardManagerTest.cpp
   ScheduleTest.cpp
+  SessionCardsTest.cpp
   ${REPO_ROOT}/src/companion/proto/Cbor.cpp
   ${REPO_ROOT}/src/companion/proto/Frame.cpp
   ${REPO_ROOT}/src/companion/proto/Messages.cpp
   ${REPO_ROOT}/src/companion/ble/ChunkBitmap.cpp
   ${REPO_ROOT}/src/companion/ble/Transfer.cpp
+  ${REPO_ROOT}/src/companion/ble/Session.cpp
   ${REPO_ROOT}/src/companion/cards/CardManager.cpp
+  ${REPO_ROOT}/src/companion/store/Outbox.cpp
 )
 
 target_include_directories(CompanionCardsTest PRIVATE

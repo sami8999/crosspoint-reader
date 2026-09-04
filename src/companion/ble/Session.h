@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "../cards/CardManager.h"
 #include "../port/Ports.h"
 #include "../proto/Frame.h"
 #include "../proto/Messages.h"
@@ -26,11 +27,13 @@ class Session {
   static constexpr uint32_t kChangePollMs = 5000;
   static constexpr uint32_t kBatteryDeltaPct = 5;
   static constexpr size_t kNameArena = 3072;
-  static constexpr uint32_t kCaps = proto::caps::kBulkTransfer;
+  // Advertised to the phone in HelloAck (PROTOCOL.md 3.2). kCards is set because
+  // this build carries CardManager; a Session is always constructed with one.
+  static constexpr uint32_t kCaps = proto::caps::kBulkTransfer | proto::caps::kCards;
   // Frame ceiling at the negotiated MTU: min(4096, 128 x (MTU - 4)) (PROTOCOL.md §1.2).
   static size_t maxFrameForMtu(uint16_t mtu);
 
-  Session(LinkPort& link, FsPort& fs, HashPort& hash, SysPort& sys, Outbox& outbox);
+  Session(LinkPort& link, FsPort& fs, HashPort& hash, SysPort& sys, Outbox& outbox, CardManager& cards);
   ~Session();
 
   // Allocates the frame scratch buffers (PSRAM). Must succeed before use.
@@ -95,6 +98,7 @@ class Session {
   void handlePushFile(const proto::FrameView& f, uint32_t nowMs);
   void handlePushEnd(const proto::FrameView& f);
   void handleDeleteFile(const proto::FrameView& f);
+  void handleSetCards(const proto::FrameView& f);
   void handleAckEvents(const proto::FrameView& f);
   void pumpOutbox();
   // Keeps flushing_ and the outbox's flusher count in step.
@@ -106,6 +110,7 @@ class Session {
   FsPort& fs_;
   SysPort& sys_;
   Outbox& outbox_;
+  CardManager& cards_;
   Transfer transfer_;
 
   State state_ = State::Idle;
@@ -127,6 +132,7 @@ class Session {
   // Large message structs live here (Session itself is PSRAM-allocated).
   proto::Files files_;
   proto::PushAck pushAck_;
+  proto::SetCards setCards_;
 };
 
 }  // namespace companion

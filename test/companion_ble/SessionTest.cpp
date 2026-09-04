@@ -2,6 +2,7 @@
 
 #include "FakePorts.h"
 #include "companion/ble/Session.h"
+#include "companion/cards/CardManager.h"
 
 using namespace companion;
 using namespace companion::proto;
@@ -18,12 +19,14 @@ struct Fixture {
   FakeSys sys;
   FakeLink link;
   Outbox outbox{fs, sys};
-  Session session{link, fs, hash, sys, outbox};
+  CardManager cards{fs, sys};
+  Session session{link, fs, hash, sys, outbox, cards};
   uint16_t phoneSeq = 0;
   uint8_t buf[kMaxFrameSize];
 
   Fixture() {
     EXPECT_TRUE(outbox.begin());
+    EXPECT_TRUE(cards.begin());
     EXPECT_TRUE(session.begin());
   }
 
@@ -258,12 +261,8 @@ TEST(Session, UnknownTypeAndBadPayload) {
   f.sendFrame(msg::kOpenBook, ob);
   EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::Unsupported);
   f.link.drain();
-  SetCards sc;
-  sc.mode = CardsMode::Pin;
-  sc.entryCount = 0;
-  f.sendFrame(msg::kSetCards, sc);
-  EXPECT_EQ(f.decode<Nack>(0, msg::kNackFromReader).code, NackCode::Unsupported);
-  f.link.drain();
+  // SetCards is wired up in this build (caps bit 1), so it is *not* in the
+  // unsupported set any more - see test/companion_cards/ for its own coverage.
   ShowReply sr;
   sr.text = "hi";
   f.sendFrame(msg::kShowReply, sr);
@@ -545,7 +544,7 @@ struct Peer {
   uint16_t phoneSeq = 0;
   uint8_t buf[kMaxFrameSize];
 
-  explicit Peer(Fixture& f) : session(link, f.fs, f.hash, f.sys, f.outbox) { EXPECT_TRUE(session.begin()); }
+  explicit Peer(Fixture& f) : session(link, f.fs, f.hash, f.sys, f.outbox, f.cards) { EXPECT_TRUE(session.begin()); }
 
   template <class M>
   void sendFrame(uint8_t type, const M& m, uint32_t nowMs = 1000) {

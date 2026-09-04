@@ -9,6 +9,7 @@ add_executable(CompanionBleTest
   ${REPO_ROOT}/src/companion/ble/ChunkBitmap.cpp
   ${REPO_ROOT}/src/companion/ble/Transfer.cpp
   ${REPO_ROOT}/src/companion/ble/Session.cpp
+  ${REPO_ROOT}/src/companion/cards/CardManager.cpp
   ${REPO_ROOT}/src/companion/store/Outbox.cpp
 )
 
